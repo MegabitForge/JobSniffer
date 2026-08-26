@@ -13,3 +13,8 @@ Job Sniffer is a Windows desktop application that will collect job offers and ev
 uv sync
 uv run job-sniffer
 ```
+
+## License
+
+Job Sniffer is licensed under GPL-3.0-only. See `LICENSE` and
+`THIRD_PARTY_NOTICES.md`.
