@@ -1,0 +1,1 @@
+"""Job source contract boundary."""
