@@ -30,9 +30,7 @@ class JobOfferRecord(Base):
     company: Mapped[str] = mapped_column(String, nullable=False)
     location: Mapped[str | None] = mapped_column(String)
     url: Mapped[str | None] = mapped_column(String)
-    apply_url: Mapped[str | None] = mapped_column(String)
     salary: Mapped[str | None] = mapped_column(String)
-    applicant_count: Mapped[str | None] = mapped_column(String)
     description_text: Mapped[str | None] = mapped_column(Text)
     posted_at: Mapped[str | None] = mapped_column(String)
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -97,9 +95,7 @@ def save_offer(session: Session, offer: JobOffer) -> bool:
             company=offer.company,
             location=offer.location,
             url=_empty_to_none(offer.url),
-            apply_url=_empty_to_none(offer.apply_url),
             salary=offer.salary,
-            applicant_count=offer.applicant_count,
             description_text=offer.description_text,
             posted_at=offer.posted_at,
             raw_json=offer.raw,
@@ -137,17 +133,18 @@ def _exists(
             JobOfferRecord.source == offer.source,
             JobOfferRecord.external_id == offer.external_id,
         )
-        return session.execute(statement).first() is not None
+        if session.execute(statement).first() is not None:
+            return True
 
     if offer.url:
         statement = select(JobOfferRecord.id).where(
             JobOfferRecord.source == offer.source,
             JobOfferRecord.url == offer.url,
         )
-        return session.execute(statement).first() is not None
+        if session.execute(statement).first() is not None:
+            return True
 
     statement = select(JobOfferRecord.id).where(
-        JobOfferRecord.source == offer.source,
         JobOfferRecord.title_norm == title_norm,
         JobOfferRecord.company_norm == company_norm,
     )

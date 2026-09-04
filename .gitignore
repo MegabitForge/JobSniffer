@@ -28,6 +28,5 @@ dist/
 Thumbs.db
 
 codebook.toml
-.linkedin-profile
-.pracuj-profile
+.*-profile
 *.sqlite

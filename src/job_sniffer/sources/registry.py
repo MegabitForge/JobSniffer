@@ -31,8 +31,14 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
     ),
     SourceDefinition(
         key="theprotocol",
-        name="TheProtocol",
-        status="not_implemented",
+        name="the:protocol",
+        status="active",
+        description="",
+    ),
+    SourceDefinition(
+        key="nofluffjobs",
+        name="No Fluff Jobs",
+        status="active",
         description="",
     ),
     SourceDefinition(

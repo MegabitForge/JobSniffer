@@ -1,25 +1,33 @@
 from __future__ import annotations
 
-import html
-import json
 import logging
 import random
 import re
-import subprocess
+import threading
 import time
 import unicodedata
 from dataclasses import replace
-from html.parser import HTMLParser
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import undetected_chromedriver as uc  # type: ignore[import-untyped]
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from job_sniffer.models import JobOffer, JobSearch
+from job_sniffer.sources._common import is_poland_location
+from job_sniffer.sources._next_data import extract_next_data
+from job_sniffer.sources._text import (
+    clean_html_text,
+    clean_multiline,
+    format_bullet_sections,
+    join_unique,
+)
+from job_sniffer.sources.browser import (
+    BrowserFetchError,
+    accept_cookies_if_visible,
+    start_undetected_chrome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +63,13 @@ class PracujJobSource:
         selenium_wait_seconds: float = 120.0,
         cloudflare_wait_seconds: float = 45.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.selenium_wait_seconds = selenium_wait_seconds
         self.cloudflare_wait_seconds = cloudflare_wait_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.stop_event = stop_event
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -73,40 +83,18 @@ class PracujJobSource:
         return self._collect_offers_with_selenium(url, limit=search.limit)
 
     def _collect_offers_with_selenium(self, url: str, *, limit: int) -> list[JobOffer]:
-        profile_dir = Path(self.chrome_user_data_dir).expanduser().resolve()
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Starting undetected Chrome with profile: %s", profile_dir)
-
-        options = uc.ChromeOptions()
-        options.user_data_dir = str(profile_dir)
-        options.add_argument("--profile-directory=Default")
-        options.add_argument("--start-maximized")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--remote-debugging-port=0")
-        prefs = {"profile.managed_default_content_settings.images": 2}
-        options.add_experimental_option("prefs", prefs)
-        options.add_argument("--disable-blink-features=AutomationControlled")
-
-        chrome_version = _detect_chrome_major_version()
-        if chrome_version is not None:
-            logger.info("Detected Chrome major version: %s", chrome_version)
+        try:
+            driver = start_undetected_chrome(self.chrome_user_data_dir)
+        except BrowserFetchError as error:
+            raise PracujBlockedError(str(error)) from error
 
         try:
-            driver = uc.Chrome(
-                options=options,
-                use_subprocess=True,
-                version_main=chrome_version,
-            )
-        except WebDriverException as error:
-            logger.exception("Undetected Chrome could not start")
-            raise PracujBlockedError(_format_chrome_start_error(error, profile_dir)) from error
-
-        try:
+            self._raise_if_stopped()
             logger.info("Opening Pracuj.pl in undetected Chrome")
             time.sleep(random.uniform(0.8, 1.5))
+            self._raise_if_stopped()
             driver.get(url)
-            _accept_cookies_if_visible(driver)
+            accept_cookies_if_visible(driver)
             try:
                 self._wait_for_next_data_payload(driver, page_label="listing")
             except TimeoutException as error:
@@ -144,12 +132,14 @@ class PracujJobSource:
             delay,
             offer.url,
         )
-        time.sleep(delay)
+        if self.stop_event and self.stop_event.wait(delay):
+            self._raise_if_stopped()
 
         try:
+            self._raise_if_stopped()
             logger.info("Opening Pracuj.pl detail page: %s", offer.url)
             driver.get(offer.url)
-            _accept_cookies_if_visible(driver)
+            accept_cookies_if_visible(driver)
             self._wait_for_next_data_payload(driver, page_label="detail")
             detail = _extract_pracuj_offer_detail_from_dom(driver)
             if not _clean(detail.get("description_text")):
@@ -193,6 +183,9 @@ class PracujJobSource:
 
         def has_payload_or_block(browser: uc.Chrome) -> bool:
             nonlocal challenge_started_at
+            if self._is_stopped():
+                return True
+
             page_source = browser.page_source
             if "__NEXT_DATA__" in page_source:
                 return True
@@ -211,12 +204,20 @@ class PracujJobSource:
             return False
 
         WebDriverWait(driver, self.selenium_wait_seconds).until(has_payload_or_block)
+        self._raise_if_stopped()
+
+    def _is_stopped(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def _raise_if_stopped(self) -> None:
+        if self._is_stopped():
+            raise PracujBlockedError("Pracuj.pl scan cancelled because the application is closing.")
 
 
 def build_search_url(search: JobSearch) -> str:
     keywords = quote(search.keywords.strip())
     location = _slugify_location(search.location)
-    location_part = "polska;ct,1" if location in {"poland", "polska"} else f"{location};wp"
+    location_part = "polska;ct,1" if is_poland_location(location) else f"{location};wp"
     return f"https://www.pracuj.pl/praca/{keywords};kw/{location_part}"
 
 
@@ -260,14 +261,11 @@ def parse_pracuj_offer_detail(html_text: str) -> dict[str, Any]:
 
 
 def _extract_next_data(html_text: str) -> dict[str, Any]:
-    parser = _NextDataParser()
-    parser.feed(html_text)
-    if not parser.payload:
-        raise ValueError("Pracuj.pl page does not contain __NEXT_DATA__ payload")
-    parsed = json.loads(html.unescape(parser.payload))
-    if not isinstance(parsed, dict):
-        raise TypeError("Pracuj.pl __NEXT_DATA__ payload is not a JSON object")
-    return parsed
+    return extract_next_data(
+        html_text,
+        missing_message="Pracuj.pl page does not contain __NEXT_DATA__ payload",
+        type_message="Pracuj.pl __NEXT_DATA__ payload is not a JSON object",
+    )
 
 
 def _iter_grouped_offers(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -330,9 +328,7 @@ def _map_offer(
         company=_clean(group.get("companyName")) or "Unknown company",
         location=location,
         url=url,
-        apply_url=None,
         salary=_clean(group.get("salaryDisplayText")),
-        applicant_count=None,
         description_text=_clean(group.get("jobDescription")),
         posted_at=_clean(group.get("lastPublicated")),
         raw=raw,
@@ -454,18 +450,7 @@ def _first_detail_value(detail_fields: dict[str, str], keys: tuple[str, ...]) ->
 
 
 def _join_unique_text(values: list[str]) -> str | None:
-    seen: set[str] = set()
-    unique_values: list[str] = []
-    for value in values:
-        normalized = _clean(value)
-        if not normalized:
-            continue
-        duplicate_key = normalized.casefold()
-        if duplicate_key in seen:
-            continue
-        seen.add(duplicate_key)
-        unique_values.append(normalized)
-    return "\n\n".join(unique_values) or None
+    return join_unique((_clean(value) for value in values), separator="\n\n")
 
 
 def _looks_like_noise(value: str) -> bool:
@@ -513,99 +498,11 @@ def _slugify_location(location: str) -> str:
 
 
 def _clean(value: object) -> str | None:
-    if value is None:
-        return None
-    text = html.unescape(str(value))
-    text = re.sub(r"\s+", " ", text).strip()
-    return text or None
+    return clean_html_text(value)
 
 
 def _clean_multiline(value: object) -> str | None:
-    if value is None:
-        return None
-    text = html.unescape(str(value)).replace("\r\n", "\n").replace("\r", "\n")
-    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
-    normalized = "\n".join(lines)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
-    return normalized or None
-
-
-def _format_chrome_start_error(error: WebDriverException, profile_dir: Path) -> str:
-    message = str(error)
-    version_match = re.search(
-        r"supports Chrome version (\d+).*?Current browser version is (\d+)",
-        message,
-        flags=re.DOTALL,
-    )
-    if version_match:
-        supported_version, current_version = version_match.groups()
-        return (
-            "Undetected ChromeDriver version does not match installed Chrome. "
-            f"Driver supports Chrome {supported_version}, installed Chrome is {current_version}. "
-            "Restart the app; it now tries to auto-detect the installed Chrome major version."
-        )
-    if "DevToolsActivePort" in message or "Chrome failed to start" in message:
-        return (
-            "Selenium could not start Chrome. Close all Chrome windows using this scraper profile "
-            f"or remove the profile directory and try again: {profile_dir}"
-        )
-    return f"Selenium could not start Chrome: {error}"
-
-
-def _detect_chrome_major_version() -> int | None:
-    candidates = (
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-        Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
-    )
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        directory_version = _detect_chrome_major_version_from_directory(candidate.parent)
-        if directory_version is not None:
-            return directory_version
-
-        try:
-            completed = subprocess.run(
-                [str(candidate), "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except OSError, subprocess.TimeoutExpired:
-            logger.exception("Could not read Chrome version from %s", candidate)
-            continue
-
-        match = re.search(r"(\d+)\.\d+\.\d+\.\d+", completed.stdout.strip())
-        if match:
-            return int(match.group(1))
-
-    logger.warning("Could not auto-detect Chrome major version")
-    return None
-
-
-def _detect_chrome_major_version_from_directory(application_dir: Path) -> int | None:
-    version_dirs: list[tuple[int, Path]] = []
-    try:
-        children = application_dir.iterdir()
-    except OSError:
-        logger.exception("Could not inspect Chrome application directory: %s", application_dir)
-        return None
-
-    for child in children:
-        if not child.is_dir():
-            continue
-        match = re.fullmatch(r"(\d+)\.\d+\.\d+\.\d+", child.name)
-        if match:
-            version_dirs.append((int(match.group(1)), child))
-
-    if not version_dirs:
-        return None
-
-    major_version, version_dir = max(version_dirs, key=lambda item: item[0])
-    logger.info("Detected Chrome version from directory: %s", version_dir.name)
-    return major_version
+    return clean_multiline(value)
 
 
 def _has_cloudflare_challenge(page_source: str) -> bool:
@@ -618,32 +515,6 @@ def _has_cloudflare_challenge(page_source: str) -> bool:
     )
     lowered = page_source.casefold()
     return any(marker in lowered for marker in challenge_markers)
-
-
-def _accept_cookies_if_visible(driver: uc.Chrome) -> None:
-    button_xpaths = (
-        "//button[contains(normalize-space(), 'Akceptuj wszystkie')]",
-        "//button[contains(normalize-space(), 'Zaakceptuj wszystkie')]",
-        "//button[contains(normalize-space(), 'Accept all')]",
-    )
-    for button_xpath in button_xpaths:
-        try:
-            buttons = driver.find_elements(By.XPATH, button_xpath)
-        except WebDriverException:
-            logger.exception("Could not inspect Pracuj.pl cookie dialog")
-            return
-
-        for button in buttons:
-            if not button.is_displayed() or not button.is_enabled():
-                continue
-            try:
-                logger.info("Accepting Pracuj.pl cookie dialog")
-                button.click()
-                time.sleep(0.5)
-                return
-            except WebDriverException:
-                logger.exception("Could not accept Pracuj.pl cookie dialog")
-                return
 
 
 def _extract_pracuj_offer_detail_from_dom(driver: uc.Chrome) -> dict[str, Any]:
@@ -825,7 +696,7 @@ def _split_description_item(item: str) -> list[str]:
 
 
 def _format_description_sections(sections: list[dict[str, Any]]) -> str | None:
-    formatted_sections: list[str] = []
+    section_tuples: list[tuple[str, list[str]]] = []
     for section in sections:
         title = _clean(section.get("title"))
         items = section.get("items")
@@ -834,10 +705,8 @@ def _format_description_sections(sections: list[dict[str, Any]]) -> str | None:
         clean_items = [clean_item for item in items if (clean_item := _clean(item))]
         if not clean_items:
             continue
-        formatted_sections.append(
-            "\n".join([f"## {title}", "", *[f"- {item}" for item in clean_items]])
-        )
-    return "\n\n".join(formatted_sections) or None
+        section_tuples.append((title, clean_items))
+    return format_bullet_sections(section_tuples)
 
 
 def _section_key(title: str) -> str:
@@ -865,25 +734,3 @@ def _dedupe_items(items: list[str]) -> list[str]:
         seen.add(key)
         unique_items.append(cleaned)
     return unique_items
-
-
-class _NextDataParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.payload: str | None = None
-        self._capture = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "script":
-            return
-        attributes = dict(attrs)
-        if attributes.get("id") == "__NEXT_DATA__":
-            self._capture = True
-
-    def handle_data(self, data: str) -> None:
-        if self._capture:
-            self.payload = (self.payload or "") + data
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "script" and self._capture:
-            self._capture = False

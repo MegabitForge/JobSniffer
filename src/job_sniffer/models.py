@@ -25,9 +25,7 @@ class JobOffer:
     company: str
     location: str | None
     url: str | None
-    apply_url: str | None
     salary: str | None
-    applicant_count: str | None
     description_text: str | None
     posted_at: str | None
     raw: dict[str, Any]
