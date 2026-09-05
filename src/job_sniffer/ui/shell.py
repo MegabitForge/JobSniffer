@@ -16,6 +16,7 @@ from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources.base import JobSource
 from job_sniffer.sources.browser import BrowserFetchError
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
+from job_sniffer.sources.olx import OlxJobSource
 from job_sniffer.sources.pracuj import PracujBlockedError, PracujJobSource
 from job_sniffer.sources.registry import SOURCE_DEFINITIONS
 from job_sniffer.sources.theprotocol import TheProtocolJobSource
@@ -222,6 +223,8 @@ def build_shell(page: ft.Page) -> ft.Control:
 def _create_source(source_key: str, *, stop_event: threading.Event) -> JobSource:
     if source_key == "pracuj":
         return PracujJobSource(stop_event=stop_event)
+    if source_key == "olx":
+        return OlxJobSource(stop_event=stop_event)
     if source_key == "theprotocol":
         return TheProtocolJobSource(stop_event=stop_event)
     if source_key == "nofluffjobs":

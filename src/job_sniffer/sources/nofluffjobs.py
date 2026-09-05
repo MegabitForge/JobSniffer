@@ -7,7 +7,6 @@ import random
 import re
 import threading
 import unicodedata
-from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 from urllib.parse import quote
@@ -389,7 +388,7 @@ def _format_location(value: Any) -> str | None:
         )
     if hybrid := _clean(value.get("hybridDesc")):
         parts.append(hybrid)
-    return _join_unique(parts)
+    return join_unique(parts)
 
 
 def _format_salary(value: Any) -> str | None:
@@ -406,7 +405,7 @@ def _format_salary(value: Any) -> str | None:
     if salary_to is not None:
         amount_to = f"{salary_to:g}" if isinstance(salary_to, float | int) else str(salary_to)
         amount = f"{amount} - {amount_to}"
-    return _join_unique([amount, currency, period, contract])
+    return join_unique([amount, currency, period, contract])
 
 
 def _format_tiles(value: Any) -> str | None:
@@ -416,12 +415,8 @@ def _format_tiles(value: Any) -> str | None:
     if not isinstance(values, list):
         return None
     tags = [item.get("value") for item in values if isinstance(item, dict)]
-    joined = _join_unique([_clean(tag) for tag in tags])
+    joined = join_unique([_clean(tag) for tag in tags])
     return f"Tags: {joined}" if joined else None
-
-
-def _join_unique(values: Sequence[str | None]) -> str | None:
-    return join_unique(values)
 
 
 def _clean(value: Any) -> str | None:

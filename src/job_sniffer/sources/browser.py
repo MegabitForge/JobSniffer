@@ -18,27 +18,6 @@ class BrowserFetchError(RuntimeError):
     """Raised when a browser-backed page fetch fails."""
 
 
-def fetch_with_undetected_chrome(
-    url: str,
-    *,
-    profile_dir: str,
-    wait_until: Callable[[uc.Chrome], bool],
-    timeout_seconds: float = 90.0,
-) -> str:
-    """Open a page with undetected Chrome and return its final HTML."""
-    driver = start_undetected_chrome(profile_dir)
-    try:
-        return fetch_with_existing_browser(
-            driver,
-            url,
-            wait_until=wait_until,
-            timeout_seconds=timeout_seconds,
-        )
-    finally:
-        logger.info("Closing undetected Chrome")
-        driver.quit()
-
-
 def start_undetected_chrome(profile_dir: str) -> uc.Chrome:
     """Start undetected Chrome with the project's standard scraper settings."""
     resolved_profile_dir = Path(profile_dir).expanduser().resolve()
@@ -77,17 +56,26 @@ def fetch_with_existing_browser(
     *,
     wait_until: Callable[[uc.Chrome], bool],
     timeout_seconds: float = 90.0,
+    page_load_timeout_seconds: float | None = None,
+    return_partial_on_timeout: bool = False,
 ) -> str:
     """Open a page in an existing browser and return its final HTML."""
     try:
         logger.info("Opening page in undetected Chrome: %s", url)
-        driver.get(url)
+        driver.set_page_load_timeout(page_load_timeout_seconds or timeout_seconds)
+        try:
+            driver.get(url)
+        except TimeoutException:
+            logger.warning("Browser page load timed out, checking partial page: %s", url)
         accept_cookies_if_visible(driver)
         WebDriverWait(driver, timeout_seconds).until(lambda browser: wait_until(browser))
         logger.info("Browser page is ready: %s", url)
         return str(driver.page_source)
     except TimeoutException as error:
         logger.exception("Timed out waiting for browser page: %s", url)
+        if return_partial_on_timeout:
+            logger.info("Returning partial browser page after timeout: %s", url)
+            return str(driver.page_source)
         raise BrowserFetchError(f"Timed out waiting for page payload: {url}") from error
     except WebDriverException as error:
         logger.exception("Browser could not load page: %s", url)
@@ -139,7 +127,11 @@ def format_chrome_start_error(error: WebDriverException, profile_dir: Path) -> s
             "The app tries to auto-detect installed Chrome, but the cached driver may need cleanup."
         )
 
-    if "DevToolsActivePort" in message or "Chrome failed to start" in message:
+    if (
+        "DevToolsActivePort" in message
+        or "Chrome failed to start" in message
+        or "chrome not reachable" in message
+    ):
         return (
             "Chrome could not start. Close Chrome windows using this scraper profile or remove "
             f"the profile directory and try again: {profile_dir}"
