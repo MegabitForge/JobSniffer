@@ -18,6 +18,10 @@ class BrowserFetchError(RuntimeError):
     """Raised when a browser-backed page fetch fails."""
 
 
+class BrowserClosedError(BrowserFetchError):
+    """Raised when the user closed the controlled browser during a scan."""
+
+
 def start_undetected_chrome(profile_dir: str) -> uc.Chrome:
     """Start undetected Chrome with the project's standard scraper settings."""
     resolved_profile_dir = Path(profile_dir).expanduser().resolve()
@@ -75,11 +79,38 @@ def fetch_with_existing_browser(
         logger.exception("Timed out waiting for browser page: %s", url)
         if return_partial_on_timeout:
             logger.info("Returning partial browser page after timeout: %s", url)
-            return str(driver.page_source)
+            try:
+                return str(driver.page_source)
+            except WebDriverException as page_error:
+                if is_browser_closed_error(page_error):
+                    raise BrowserClosedError(
+                        "Browser was closed during scan. Stopping current scan."
+                    ) from page_error
+                raise
         raise BrowserFetchError(f"Timed out waiting for page payload: {url}") from error
     except WebDriverException as error:
         logger.exception("Browser could not load page: %s", url)
+        if is_browser_closed_error(error):
+            raise BrowserClosedError(
+                "Browser was closed during scan. Stopping current scan."
+            ) from error
         raise BrowserFetchError(f"Browser could not load page: {error}") from error
+
+
+def is_browser_closed_error(error: WebDriverException) -> bool:
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "invalid session id",
+            "no such window",
+            "target window already closed",
+            "web view not found",
+            "disconnected: not connected to devtools",
+            "not connected to devtools",
+            "chrome not reachable",
+        )
+    )
 
 
 def accept_cookies_if_visible(driver: uc.Chrome) -> None:

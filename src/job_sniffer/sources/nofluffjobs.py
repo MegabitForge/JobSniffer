@@ -9,7 +9,7 @@ import threading
 import unicodedata
 from dataclasses import replace
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 from selectolax.parser import HTMLParser
@@ -17,7 +17,16 @@ from selectolax.parser import HTMLParser
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources._common import DEFAULT_USER_AGENT, is_poland_location
 from job_sniffer.sources._text import clean_text, format_bullet_sections, join_unique
-from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
+from job_sniffer.sources.base import (
+    DuplicateChecker,
+    EnrichedOfferHandler,
+    dedupe_listing_offers,
+    filter_new_offers,
+    limit_offers,
+    offer_listing_key,
+    process_enriched_offers,
+    wait_before_next_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +39,19 @@ class NoFluffJobsSource:
         *,
         timeout_seconds: float = 30.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        max_pages: int = 20,
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
+        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.pagination_delay_seconds = pagination_delay_seconds
+        self.max_pages = max_pages
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
+        self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -45,18 +60,54 @@ class NoFluffJobsSource:
             search.location,
             search.limit,
         )
-        data = self._fetch_listing_data(search)
-        postings = data.get("postings", [])
-        if not isinstance(postings, list):
-            raise TypeError("NoFluffJobs API returned an unexpected postings payload")
-
-        offers = [_map_posting(posting) for posting in postings if isinstance(posting, dict)]
+        offers = self._collect_listing_pages(search)
         new_offers = filter_new_offers(offers, self.duplicate_checker)
         logger.info("NoFluffJobs returned %s offers, %s were new", len(offers), len(new_offers))
-        limited_offers = new_offers if search.limit is None else new_offers[: search.limit]
-        return [self._enrich_offer_from_detail(offer) for offer in limited_offers]
+        limited_offers = limit_offers(new_offers, search.limit)
+        return process_enriched_offers(
+            limited_offers,
+            self._enrich_offer_from_detail,
+            self.enriched_offer_handler,
+        )
 
-    def _fetch_listing_data(self, search: JobSearch) -> dict[str, Any]:
+    def _collect_listing_pages(self, search: JobSearch) -> list[JobOffer]:
+        offers: list[JobOffer] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for page in range(1, self.max_pages + 1):
+            self._raise_if_stopped()
+            self._wait_before_listing_page(page)
+            data = self._fetch_listing_data(search, page=page)
+            postings = data.get("postings", [])
+            if not isinstance(postings, list):
+                raise TypeError("NoFluffJobs API returned an unexpected postings payload")
+            page_offers = [
+                _map_posting(posting) for posting in postings if isinstance(posting, dict)
+            ]
+            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
+            logger.info(
+                "Parsed %s NoFluffJobs offers from listing page %s, %s were new in this scan",
+                len(page_offers),
+                page,
+                len(page_new),
+            )
+            if not page_offers or not page_new:
+                break
+            for offer in page_new:
+                seen_keys.add(offer_listing_key(offer))
+            offers.extend(page_new)
+        else:
+            logger.warning("Stopped NoFluffJobs pagination after max_pages=%s", self.max_pages)
+
+        return dedupe_listing_offers(offers)
+
+    def _wait_before_listing_page(self, page: int) -> None:
+        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
+        if delay is not None:
+            logger.info("Waited %.1fs before NoFluffJobs listing page %s", delay, page)
+        self._raise_if_stopped()
+
+    def _fetch_listing_data(self, search: JobSearch, *, page: int) -> dict[str, Any]:
         if is_poland_location(search.location):
             response = httpx.get(
                 "https://nofluffjobs.com/api/joboffers/main",
@@ -64,6 +115,7 @@ class NoFluffJobsSource:
                     "salaryCurrency": "PLN",
                     "salaryPeriod": "MONTH",
                     "criteria": search.keywords,
+                    "page": page,
                 },
                 headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT},
                 timeout=self.timeout_seconds,
@@ -74,7 +126,7 @@ class NoFluffJobsSource:
                 raise TypeError("NoFluffJobs API returned an unexpected listing payload")
             return data
 
-        url = build_search_url(search)
+        url = _with_page(build_search_url(search), page)
         logger.info("Fetching NoFluffJobs location-filtered page: %s", url)
         response = httpx.get(
             url,
@@ -153,6 +205,17 @@ def build_search_url(search: JobSearch) -> str:
     if not keyword:
         return f"https://nofluffjobs.com/pl/{location}"
     return f"https://nofluffjobs.com/pl/{location}?criteria={keyword}"
+
+
+def _with_page(url: str, page: int) -> str:
+    if page <= 1:
+        return url
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def _extract_listing_data_from_state(html_text: str) -> dict[str, Any]:

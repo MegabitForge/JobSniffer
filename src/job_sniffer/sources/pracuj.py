@@ -8,7 +8,7 @@ import time
 import unicodedata
 from dataclasses import replace
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import undetected_chromedriver as uc  # type: ignore[import-untyped]
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -23,10 +23,21 @@ from job_sniffer.sources._text import (
     format_bullet_sections,
     join_unique,
 )
-from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
+from job_sniffer.sources.base import (
+    DuplicateChecker,
+    EnrichedOfferHandler,
+    dedupe_listing_offers,
+    filter_new_offers,
+    limit_offers,
+    offer_listing_key,
+    process_enriched_offers,
+    wait_before_next_page,
+)
 from job_sniffer.sources.browser import (
+    BrowserClosedError,
     BrowserFetchError,
     accept_cookies_if_visible,
+    is_browser_closed_error,
     start_undetected_chrome,
 )
 
@@ -64,15 +75,21 @@ class PracujJobSource:
         selenium_wait_seconds: float = 120.0,
         cloudflare_wait_seconds: float = 45.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        max_pages: int = 20,
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
+        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.selenium_wait_seconds = selenium_wait_seconds
         self.cloudflare_wait_seconds = cloudflare_wait_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.pagination_delay_seconds = pagination_delay_seconds
+        self.max_pages = max_pages
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
+        self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -106,23 +123,10 @@ class PracujJobSource:
             logger.info("Opening Pracuj.pl in undetected Chrome")
             time.sleep(random.uniform(0.8, 1.5))
             self._raise_if_stopped()
-            driver.get(url)
-            accept_cookies_if_visible(driver)
-            try:
-                self._wait_for_next_data_payload(driver, page_label="listing")
-            except TimeoutException as error:
-                logger.exception("Timed out waiting for Pracuj.pl listing payload")
-                raise PracujBlockedError(
-                    "Pracuj.pl did not expose the listing payload in Selenium before timeout. "
-                    "Cloudflare may be blocking the automated browser."
-                ) from error
-            logger.info("Pracuj.pl listing payload is available")
-            listing_html = str(driver.page_source)
-            logger.info("Parsing Pracuj.pl page payload")
-            offers = parse_pracuj_offers(listing_html, source_name=self.source_name)
+            offers = self._collect_listing_pages(driver, url)
             matching_offers = _filter_by_location(offers, location)
             new_offers = filter_new_offers(matching_offers, self.duplicate_checker)
-            limited_offers = new_offers if limit is None else new_offers[:limit]
+            limited_offers = limit_offers(new_offers, limit)
             logger.info(
                 "Parsed %s Pracuj.pl offers, %s matched location, %s were new, enriching %s detail pages",
                 len(offers),
@@ -130,13 +134,68 @@ class PracujJobSource:
                 len(new_offers),
                 len(limited_offers),
             )
-            return [self._enrich_offer_from_detail(driver, offer) for offer in limited_offers]
+            return process_enriched_offers(
+                limited_offers,
+                lambda offer: self._enrich_offer_from_detail(driver, offer),
+                self.enriched_offer_handler,
+            )
         except WebDriverException as error:
             logger.exception("Selenium could not load Pracuj.pl")
+            if is_browser_closed_error(error):
+                raise BrowserClosedError(
+                    "Browser was closed during scan. Stopping current scan."
+                ) from error
             raise PracujBlockedError(f"Selenium could not load Pracuj.pl: {error}") from error
         finally:
             logger.info("Closing undetected Chrome")
-            driver.quit()
+            try:
+                driver.quit()
+            except WebDriverException:
+                logger.info("Pracuj.pl browser session was already closed")
+
+    def _collect_listing_pages(self, driver: uc.Chrome, url: str) -> list[JobOffer]:
+        offers: list[JobOffer] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for page in range(1, self.max_pages + 1):
+            self._raise_if_stopped()
+            self._wait_before_listing_page(page)
+            page_url = _with_page(url, page)
+            logger.info("Opening Pracuj.pl listing page %s: %s", page, page_url)
+            driver.get(page_url)
+            accept_cookies_if_visible(driver)
+            try:
+                self._wait_for_next_data_payload(driver, page_label=f"listing page {page}")
+            except TimeoutException as error:
+                logger.exception("Timed out waiting for Pracuj.pl listing payload")
+                raise PracujBlockedError(
+                    "Pracuj.pl did not expose the listing payload in Selenium before timeout. "
+                    "Cloudflare may be blocking the automated browser."
+                ) from error
+
+            page_offers = parse_pracuj_offers(str(driver.page_source), source_name=self.source_name)
+            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
+            logger.info(
+                "Parsed %s Pracuj.pl offers from listing page %s, %s were new in this scan",
+                len(page_offers),
+                page,
+                len(page_new),
+            )
+            if not page_offers or not page_new:
+                break
+            for offer in page_new:
+                seen_keys.add(offer_listing_key(offer))
+            offers.extend(page_new)
+        else:
+            logger.warning("Stopped Pracuj.pl pagination after max_pages=%s", self.max_pages)
+
+        return dedupe_listing_offers(offers)
+
+    def _wait_before_listing_page(self, page: int) -> None:
+        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
+        if delay is not None:
+            logger.info("Waited %.1fs before Pracuj.pl listing page %s", delay, page)
+        self._raise_if_stopped()
 
     def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer:
         if not offer.url:
@@ -164,12 +223,18 @@ class PracujJobSource:
                     "Could not extract Pracuj.pl detail sections from DOM, falling back to payload"
                 )
                 detail = parse_pracuj_offer_detail(str(driver.page_source))
+        except WebDriverException as error:
+            if is_browser_closed_error(error):
+                raise BrowserClosedError(
+                    "Browser was closed during scan. Stopping current scan."
+                ) from error
+            logger.exception("Could not enrich Pracuj.pl offer from detail page: %s", offer.url)
+            return offer
         except (
             PracujBlockedError,
             TimeoutException,
             ValueError,
             TypeError,
-            WebDriverException,
         ):
             logger.exception("Could not enrich Pracuj.pl offer from detail page: %s", offer.url)
             return offer
@@ -240,10 +305,21 @@ def build_search_url(search: JobSearch) -> str:
             if keywords
             else "https://www.pracuj.pl/praca"
         )
-    location_part = f"{location};wp"
+    location_part = f"{quote(location, safe='')};wp"
     if not keywords:
         return f"https://www.pracuj.pl/praca/{location_part}"
     return f"https://www.pracuj.pl/praca/{keywords};kw/{location_part}"
+
+
+def _with_page(url: str, page: int) -> str:
+    if page <= 1:
+        return url
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["pn"] = str(page)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def parse_pracuj_offers(html_text: str, *, source_name: str = "pracuj.pl") -> list[JobOffer]:
@@ -553,7 +629,8 @@ def _slugify_location(location: str) -> str:
     value = location.strip().casefold().translate(str.maketrans("ł", "l"))
     value = unicodedata.normalize("NFKD", value)
     value = "".join(char for char in value if not unicodedata.combining(char))
-    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = " ".join(value.split())
     return value or "polska"
 
 

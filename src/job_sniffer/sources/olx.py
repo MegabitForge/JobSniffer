@@ -8,7 +8,7 @@ import threading
 import unicodedata
 from dataclasses import replace
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 import undetected_chromedriver as uc  # type: ignore[import-untyped]
 from selectolax.parser import HTMLParser
@@ -23,8 +23,18 @@ from job_sniffer.sources._text import (
     html_to_text,
     join_unique,
 )
-from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
+from job_sniffer.sources.base import (
+    DuplicateChecker,
+    EnrichedOfferHandler,
+    dedupe_listing_offers,
+    filter_new_offers,
+    limit_offers,
+    offer_listing_key,
+    process_enriched_offers,
+    wait_before_next_page,
+)
 from job_sniffer.sources.browser import (
+    BrowserClosedError,
     BrowserFetchError,
     fetch_with_existing_browser,
     start_undetected_chrome,
@@ -43,15 +53,21 @@ class OlxJobSource:
         timeout_seconds: float = 90.0,
         page_load_timeout_seconds: float = 5.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        max_pages: int = 20,
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
+        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
         self.page_load_timeout_seconds = page_load_timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.pagination_delay_seconds = pagination_delay_seconds
+        self.max_pages = max_pages
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
+        self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -67,15 +83,55 @@ class OlxJobSource:
     def _collect_offers_with_browser(self, url: str, *, limit: int | None) -> list[JobOffer]:
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
-            html_text = self._fetch_listing_html(driver, url)
-            offers = parse_olx_offers(html_text)
+            offers = self._collect_listing_pages(driver, url)
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s OLX offers, %s were new", len(offers), len(new_offers))
-            limited_offers = new_offers if limit is None else new_offers[:limit]
-            return [self._enrich_offer_from_detail(driver, offer) for offer in limited_offers]
+            limited_offers = limit_offers(new_offers, limit)
+            return process_enriched_offers(
+                limited_offers,
+                lambda offer: self._enrich_offer_from_detail(driver, offer),
+                self.enriched_offer_handler,
+            )
         finally:
             logger.info("Closing OLX browser session")
-            driver.quit()
+            try:
+                driver.quit()
+            except WebDriverException:
+                logger.info("OLX browser session was already closed")
+
+    def _collect_listing_pages(self, driver: uc.Chrome, url: str) -> list[JobOffer]:
+        offers: list[JobOffer] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for page in range(1, self.max_pages + 1):
+            self._raise_if_stopped()
+            self._wait_before_listing_page(page)
+            page_url = _with_page(url, page)
+            logger.info("Fetching OLX listing page %s: %s", page, page_url)
+            html_text = self._fetch_listing_html(driver, page_url)
+            page_offers = parse_olx_offers(html_text)
+            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
+            logger.info(
+                "Parsed %s OLX offers from listing page %s, %s were new in this scan",
+                len(page_offers),
+                page,
+                len(page_new),
+            )
+            if not page_offers or not page_new:
+                break
+            for offer in page_new:
+                seen_keys.add(offer_listing_key(offer))
+            offers.extend(page_new)
+        else:
+            logger.warning("Stopped OLX pagination after max_pages=%s", self.max_pages)
+
+        return dedupe_listing_offers(offers)
+
+    def _wait_before_listing_page(self, page: int) -> None:
+        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
+        if delay is not None:
+            logger.info("Waited %.1fs before OLX listing page %s", delay, page)
+        self._raise_if_stopped()
 
     def _fetch_listing_html(self, driver: uc.Chrome, url: str) -> str:
         return fetch_with_existing_browser(
@@ -108,6 +164,8 @@ class OlxJobSource:
 
         try:
             detail = parse_olx_offer_detail(self._fetch_detail_html(driver, offer.url))
+        except BrowserClosedError:
+            raise
         except BrowserFetchError, TypeError, ValueError, WebDriverException:
             logger.exception("Could not enrich OLX offer from detail page: %s", offer.url)
             return offer
@@ -132,6 +190,10 @@ class OlxJobSource:
     def _is_stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
 
+    def _raise_if_stopped(self) -> None:
+        if self._is_stopped():
+            raise BrowserFetchError("OLX scan cancelled because the application is closing.")
+
 
 def build_search_url(search: JobSearch) -> str:
     keyword = quote("-".join(search.keywords.casefold().split()))
@@ -143,6 +205,17 @@ def build_search_url(search: JobSearch) -> str:
     if not keyword:
         return "https://www.olx.pl/praca/"
     return f"https://www.olx.pl/praca/q-{keyword}/"
+
+
+def _with_page(url: str, page: int) -> str:
+    if page <= 1:
+        return url
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def _slugify_location(location: str) -> str:

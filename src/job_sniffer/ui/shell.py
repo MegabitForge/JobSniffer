@@ -10,11 +10,10 @@ from typing import Any
 import flet as ft
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from job_sniffer.database import SaveStats, connect, init_db, offer_exists, save_offer
 from job_sniffer.models import JobOffer, JobSearch
-from job_sniffer.sources.base import DuplicateChecker, JobSource
+from job_sniffer.sources.base import DuplicateChecker, EnrichedOfferHandler, JobSource
 from job_sniffer.sources.browser import BrowserFetchError
 from job_sniffer.sources.bulldogjob import BulldogjobSource
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
@@ -158,19 +157,43 @@ def build_shell(page: ft.Page) -> ft.Control:
                     pre_enrich_duplicates += 1
                 return exists
 
-            offers = _create_source(
+            inserted_offers: list[JobOffer] = []
+            save_seen = 0
+            save_duplicates = 0
+
+            def save_enriched_offer(offer: JobOffer) -> bool:
+                nonlocal save_seen, save_duplicates
+                if stop_event.is_set():
+                    raise RuntimeError("Scan cancelled because the application is closing.")
+                save_seen += 1
+                inserted = save_offer(session, offer)
+                if inserted:
+                    inserted_offers.append(offer)
+                    logger.info(
+                        "Saved enriched offer immediately: %s - %s", offer.title, offer.company
+                    )
+                else:
+                    save_duplicates += 1
+                    logger.info(
+                        "Skipped duplicate after enrich: %s - %s",
+                        offer.title,
+                        offer.company,
+                    )
+                return inserted
+
+            _create_source(
                 source_key,
                 stop_event=stop_event,
                 duplicate_checker=duplicate_checker,
+                enriched_offer_handler=save_enriched_offer,
             ).search(search)
-            offer_list = list(offers)
             if stop_event.is_set():
                 raise RuntimeError("Scan cancelled because the application is closing.")
-            logger.info("Fetched %s new offers from %s, saving to db", len(offer_list), source_key)
-            inserted_offers, stats = _save_offers(
-                offer_list,
-                source_key=source_key,
-                session=session,
+            logger.info("Saved %s enriched offers from %s", len(inserted_offers), source_key)
+            stats = SaveStats(
+                seen=save_seen,
+                inserted=len(inserted_offers),
+                duplicates=save_duplicates,
             )
             return inserted_offers, _include_pre_enrich_duplicates(
                 stats,
@@ -179,19 +202,6 @@ def build_shell(page: ft.Page) -> ft.Control:
         finally:
             logger.info("Closing SQLite session")
             session.close()
-
-    def _save_offers(
-        offers: list[JobOffer], *, source_key: str, session: Session
-    ) -> tuple[list[JobOffer], SaveStats]:
-        logger.info("Saving offers: source=%s", source_key)
-        inserted_offers = [offer for offer in offers if save_offer(session, offer)]
-        seen = len(offers)
-        stats = SaveStats(
-            seen=seen,
-            inserted=len(inserted_offers),
-            duplicates=seen - len(inserted_offers),
-        )
-        return inserted_offers, stats
 
     def _include_pre_enrich_duplicates(
         stats: SaveStats,
@@ -266,17 +276,38 @@ def _create_source(
     *,
     stop_event: threading.Event,
     duplicate_checker: DuplicateChecker | None = None,
+    enriched_offer_handler: EnrichedOfferHandler | None = None,
 ) -> JobSource:
     if source_key == "pracuj":
-        return PracujJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
+        return PracujJobSource(
+            stop_event=stop_event,
+            duplicate_checker=duplicate_checker,
+            enriched_offer_handler=enriched_offer_handler,
+        )
     if source_key == "olx":
-        return OlxJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
+        return OlxJobSource(
+            stop_event=stop_event,
+            duplicate_checker=duplicate_checker,
+            enriched_offer_handler=enriched_offer_handler,
+        )
     if source_key == "theprotocol":
-        return TheProtocolJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
+        return TheProtocolJobSource(
+            stop_event=stop_event,
+            duplicate_checker=duplicate_checker,
+            enriched_offer_handler=enriched_offer_handler,
+        )
     if source_key == "nofluffjobs":
-        return NoFluffJobsSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
+        return NoFluffJobsSource(
+            stop_event=stop_event,
+            duplicate_checker=duplicate_checker,
+            enriched_offer_handler=enriched_offer_handler,
+        )
     if source_key == "bulldogjob":
-        return BulldogjobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
+        return BulldogjobSource(
+            stop_event=stop_event,
+            duplicate_checker=duplicate_checker,
+            enriched_offer_handler=enriched_offer_handler,
+        )
     raise ValueError(f"Unsupported source: {source_key}")
 
 

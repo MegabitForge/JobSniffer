@@ -27,7 +27,7 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
         key="olx",
         name="OLX",
         status="active",
-        description="",
+        description="Unstable",
     ),
     SourceDefinition(
         key="theprotocol",

@@ -22,7 +22,16 @@ from job_sniffer.sources._text import (
     format_bullet_sections,
     join_unique,
 )
-from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
+from job_sniffer.sources.base import (
+    DuplicateChecker,
+    EnrichedOfferHandler,
+    dedupe_listing_offers,
+    filter_new_offers,
+    limit_offers,
+    offer_listing_key,
+    process_enriched_offers,
+    wait_before_next_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +44,19 @@ class BulldogjobSource:
         *,
         timeout_seconds: float = 30.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        max_pages: int = 20,
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
+        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.pagination_delay_seconds = pagination_delay_seconds
+        self.max_pages = max_pages
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
+        self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -52,17 +67,54 @@ class BulldogjobSource:
         )
         url = build_search_url(search)
         logger.info("Built Bulldogjob search URL: %s", url)
-        response = httpx.get(
-            url,
-            headers={"Accept": "text/html", "User-Agent": DEFAULT_USER_AGENT},
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        offers = parse_bulldogjob_offers(response.text)
+        offers = self._collect_listing_pages(url)
         new_offers = filter_new_offers(offers, self.duplicate_checker)
         logger.info("Parsed %s Bulldogjob offers, %s were new", len(offers), len(new_offers))
-        limited_offers = new_offers if search.limit is None else new_offers[: search.limit]
-        return [self._enrich_offer_from_detail(offer) for offer in limited_offers]
+        limited_offers = limit_offers(new_offers, search.limit)
+        return process_enriched_offers(
+            limited_offers,
+            self._enrich_offer_from_detail,
+            self.enriched_offer_handler,
+        )
+
+    def _collect_listing_pages(self, url: str) -> list[JobOffer]:
+        offers: list[JobOffer] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for page in range(1, self.max_pages + 1):
+            self._raise_if_stopped()
+            self._wait_before_listing_page(page)
+            page_url = _with_page(url, page)
+            logger.info("Fetching Bulldogjob listing page %s: %s", page, page_url)
+            response = httpx.get(
+                page_url,
+                headers={"Accept": "text/html", "User-Agent": DEFAULT_USER_AGENT},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            page_offers = parse_bulldogjob_offers(response.text)
+            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
+            logger.info(
+                "Parsed %s Bulldogjob offers from listing page %s, %s were new in this scan",
+                len(page_offers),
+                page,
+                len(page_new),
+            )
+            if not page_offers or not page_new:
+                break
+            for offer in page_new:
+                seen_keys.add(offer_listing_key(offer))
+            offers.extend(page_new)
+        else:
+            logger.warning("Stopped Bulldogjob pagination after max_pages=%s", self.max_pages)
+
+        return dedupe_listing_offers(offers)
+
+    def _wait_before_listing_page(self, page: int) -> None:
+        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
+        if delay is not None:
+            logger.info("Waited %.1fs before Bulldogjob listing page %s", delay, page)
+        self._raise_if_stopped()
 
     def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer:
         if not offer.url:
@@ -117,6 +169,15 @@ def build_search_url(search: JobSearch) -> str:
     if not filters:
         return "https://bulldogjob.pl/companies/jobs/s/page,1"
     return "https://bulldogjob.pl/companies/jobs/s/" + "/".join(filters)
+
+
+def _with_page(url: str, page: int) -> str:
+    page_segment = f"page,{page}"
+    if re.search(r"(?:^|/)page,\d+(?:/|$)", url):
+        return re.sub(r"(?:^|/)page,\d+(?=/|$)", f"/{page_segment}", url)
+    if "/s/" in url:
+        return f"{url.rstrip('/')}/{page_segment}"
+    return f"{url.rstrip('/')}/s/{page_segment}"
 
 
 def parse_bulldogjob_offers(html_text: str) -> list[JobOffer]:

@@ -8,9 +8,10 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 import undetected_chromedriver as uc  # type: ignore[import-untyped]
+from selenium.common.exceptions import WebDriverException
 
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources._common import is_poland_location
@@ -21,8 +22,18 @@ from job_sniffer.sources._text import (
     format_bullet_sections,
     join_unique,
 )
-from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
+from job_sniffer.sources.base import (
+    DuplicateChecker,
+    EnrichedOfferHandler,
+    dedupe_listing_offers,
+    filter_new_offers,
+    limit_offers,
+    offer_listing_key,
+    process_enriched_offers,
+    wait_before_next_page,
+)
 from job_sniffer.sources.browser import (
+    BrowserClosedError,
     BrowserFetchError,
     fetch_with_existing_browser,
     start_undetected_chrome,
@@ -40,14 +51,20 @@ class TheProtocolJobSource:
         chrome_user_data_dir: str = ".theprotocol-profile",
         timeout_seconds: float = 90.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
+        max_pages: int = 20,
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
+        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
+        self.pagination_delay_seconds = pagination_delay_seconds
+        self.max_pages = max_pages
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
+        self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -65,15 +82,54 @@ class TheProtocolJobSource:
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
             self._raise_if_stopped()
-            html_text = self._fetch_html(driver, url)
-            offers = parse_theprotocol_offers(html_text)
+            offers = self._collect_listing_pages(driver, url)
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
-            limited_offers = new_offers if search.limit is None else new_offers[: search.limit]
-            return [self._enrich_offer_from_detail(driver, offer) for offer in limited_offers]
+            limited_offers = limit_offers(new_offers, search.limit)
+            return process_enriched_offers(
+                limited_offers,
+                lambda offer: self._enrich_offer_from_detail(driver, offer),
+                self.enriched_offer_handler,
+            )
         finally:
             logger.info("Closing TheProtocol browser session")
-            driver.quit()
+            try:
+                driver.quit()
+            except WebDriverException:
+                logger.info("TheProtocol browser session was already closed")
+
+    def _collect_listing_pages(self, driver: uc.Chrome, url: str) -> list[JobOffer]:
+        offers: list[JobOffer] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for page in range(1, self.max_pages + 1):
+            self._raise_if_stopped()
+            self._wait_before_listing_page(page)
+            page_url = _with_page(url, page)
+            html_text = self._fetch_html(driver, page_url)
+            page_offers = parse_theprotocol_offers(html_text)
+            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
+            logger.info(
+                "Parsed %s TheProtocol offers from listing page %s, %s were new in this scan",
+                len(page_offers),
+                page,
+                len(page_new),
+            )
+            if not page_offers or not page_new:
+                break
+            for offer in page_new:
+                seen_keys.add(offer_listing_key(offer))
+            offers.extend(page_new)
+        else:
+            logger.warning("Stopped TheProtocol pagination after max_pages=%s", self.max_pages)
+
+        return dedupe_listing_offers(offers)
+
+    def _wait_before_listing_page(self, page: int) -> None:
+        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
+        if delay is not None:
+            logger.info("Waited %.1fs before TheProtocol listing page %s", delay, page)
+        self._raise_if_stopped()
 
     def _fetch_html(self, driver: uc.Chrome, url: str) -> str:
         logger.info("Fetching TheProtocol page with existing browser: %s", url)
@@ -101,6 +157,8 @@ class TheProtocolJobSource:
         try:
             html_text = self._fetch_html(driver, offer.url)
             detail = parse_theprotocol_offer_detail(html_text)
+        except BrowserClosedError:
+            raise
         except BrowserFetchError, TypeError, ValueError:
             logger.exception("Could not parse TheProtocol detail page: %s", offer.url)
             return offer
@@ -136,6 +194,17 @@ def build_search_url(search: JobSearch) -> str:
     if not keyword:
         return f"https://theprotocol.it/filtry/{location};wp"
     return f"https://theprotocol.it/filtry/{location};wp?kw={keyword}"
+
+
+def _with_page(url: str, page: int) -> str:
+    if page <= 1:
+        return url
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["pageNumber"] = str(page)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def parse_theprotocol_offers(html_text: str) -> list[JobOffer]:
