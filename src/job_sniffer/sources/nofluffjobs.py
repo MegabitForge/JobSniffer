@@ -146,6 +146,8 @@ def build_search_url(search: JobSearch) -> str:
         return "https://nofluffjobs.com/pl"
     location = _slugify_location(search.location)
     keyword = quote(search.keywords.strip())
+    if not keyword:
+        return f"https://nofluffjobs.com/pl/{location}"
     return f"https://nofluffjobs.com/pl/{location}?criteria={keyword}"
 
 

@@ -50,10 +50,6 @@ packages = ["src/job_sniffer"]
 path = "src"
 module = "main"
 
-[tool.pytest.ini_options]
-addopts = "-ra"
-testpaths = ["tests"]
-
 [tool.ruff]
 line-length = 100
 target-version = "py314"

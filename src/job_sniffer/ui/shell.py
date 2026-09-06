@@ -15,6 +15,7 @@ from job_sniffer.database import SaveStats, connect, init_db, save_offer
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources.base import JobSource
 from job_sniffer.sources.browser import BrowserFetchError
+from job_sniffer.sources.bulldogjob import BulldogjobSource
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
 from job_sniffer.sources.olx import OlxJobSource
 from job_sniffer.sources.pracuj import PracujBlockedError, PracujJobSource
@@ -33,11 +34,12 @@ def build_shell(page: ft.Page) -> ft.Control:
 
     keywords = ft.TextField(
         label="Keywords",
-        value="python developer",
+        value="",
     )
     location = ft.TextField(
         label="Location",
-        value="Poland",
+        hint_text="Optional",
+        value="",
     )
     limit = ft.TextField(
         label="Limit",
@@ -80,7 +82,7 @@ def build_shell(page: ft.Page) -> ft.Control:
         except ValueError:
             limit_value = 0
 
-        if not source_key or not keywords_value or not location_value or limit_value < 1:
+        if not source_key or limit_value < 1:
             logger.warning(
                 "Invalid scan form values: source=%r keywords=%r location=%r limit=%r",
                 source.value,
@@ -88,7 +90,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                 location.value,
                 limit.value,
             )
-            status.value = "Choose a source and provide keywords, location, and a positive limit."
+            status.value = "Choose a source and provide a positive limit."
             page.update()
             return
 
@@ -229,6 +231,8 @@ def _create_source(source_key: str, *, stop_event: threading.Event) -> JobSource
         return TheProtocolJobSource(stop_event=stop_event)
     if source_key == "nofluffjobs":
         return NoFluffJobsSource(stop_event=stop_event)
+    if source_key == "bulldogjob":
+        return BulldogjobSource(stop_event=stop_event)
     raise ValueError(f"Unsupported source: {source_key}")
 
 

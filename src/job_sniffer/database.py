@@ -111,17 +111,6 @@ def save_offer(session: Session, offer: JobOffer) -> bool:
     return True
 
 
-def save_offers(session: Session, offers: list[JobOffer]) -> SaveStats:
-    """Persist offers and return insert/duplicate counts."""
-    inserted = 0
-    for offer in offers:
-        if save_offer(session, offer):
-            inserted += 1
-
-    seen = len(offers)
-    return SaveStats(seen=seen, inserted=inserted, duplicates=seen - inserted)
-
-
 def _exists(
     session: Session,
     offer: JobOffer,

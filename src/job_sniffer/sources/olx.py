@@ -130,11 +130,14 @@ class OlxJobSource:
 
 def build_search_url(search: JobSearch) -> str:
     keyword = quote("-".join(search.keywords.casefold().split()))
-    base = f"https://www.olx.pl/praca/q-{keyword}/"
     if not is_poland_location(search.location):
         location = _slugify_location(search.location)
+        if not keyword:
+            return f"https://www.olx.pl/praca/{quote(location)}/"
         return f"https://www.olx.pl/praca/{quote(location)}/q-{keyword}/"
-    return base
+    if not keyword:
+        return "https://www.olx.pl/praca/"
+    return f"https://www.olx.pl/praca/q-{keyword}/"
 
 
 def _slugify_location(location: str) -> str:

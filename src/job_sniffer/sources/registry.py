@@ -42,9 +42,9 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
         description="",
     ),
     SourceDefinition(
-        key="justjoinit",
-        name="JustJoinIT",
-        status="not_implemented",
+        key="bulldogjob",
+        name="Bulldogjob",
+        status="active",
         description="",
     ),
     SourceDefinition(

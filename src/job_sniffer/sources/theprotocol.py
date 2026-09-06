@@ -125,8 +125,12 @@ class TheProtocolJobSource:
 def build_search_url(search: JobSearch) -> str:
     keyword = quote(search.keywords.strip())
     if is_poland_location(search.location):
+        if not keyword:
+            return "https://theprotocol.it/praca"
         return f"https://theprotocol.it/praca?kw={keyword}"
     location = _slugify_location(search.location)
+    if not keyword:
+        return f"https://theprotocol.it/filtry/{location};wp"
     return f"https://theprotocol.it/filtry/{location};wp?kw={keyword}"
 
 

@@ -215,9 +215,17 @@ class PracujJobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
-    keywords = quote(search.keywords.strip())
     location = _slugify_location(search.location)
-    location_part = "polska;ct,1" if is_poland_location(location) else f"{location};wp"
+    keywords = quote(search.keywords.strip())
+    if is_poland_location(location):
+        return (
+            f"https://www.pracuj.pl/praca/{keywords};kw"
+            if keywords
+            else "https://www.pracuj.pl/praca"
+        )
+    location_part = f"{location};wp"
+    if not keywords:
+        return f"https://www.pracuj.pl/praca/{location_part}"
     return f"https://www.pracuj.pl/praca/{keywords};kw/{location_part}"
 
 
