@@ -17,6 +17,7 @@ from selectolax.parser import HTMLParser
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources._common import DEFAULT_USER_AGENT, is_poland_location
 from job_sniffer.sources._text import clean_text, format_bullet_sections, join_unique
+from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,12 @@ class NoFluffJobsSource:
         timeout_seconds: float = 30.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
         stop_event: threading.Event | None = None,
+        duplicate_checker: DuplicateChecker | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
         self.stop_event = stop_event
+        self.duplicate_checker = duplicate_checker
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -48,8 +51,9 @@ class NoFluffJobsSource:
             raise TypeError("NoFluffJobs API returned an unexpected postings payload")
 
         offers = [_map_posting(posting) for posting in postings if isinstance(posting, dict)]
-        logger.info("NoFluffJobs returned %s offers", len(offers))
-        limited_offers = offers[: search.limit]
+        new_offers = filter_new_offers(offers, self.duplicate_checker)
+        logger.info("NoFluffJobs returned %s offers, %s were new", len(offers), len(new_offers))
+        limited_offers = new_offers if search.limit is None else new_offers[: search.limit]
         return [self._enrich_offer_from_detail(offer) for offer in limited_offers]
 
     def _fetch_listing_data(self, search: JobSearch) -> dict[str, Any]:
@@ -243,7 +247,7 @@ def _extract_server_app_state(tree: HTMLParser) -> dict[str, Any] | None:
 
 def _extract_posting_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     for key, value in payload.items():
-        if isinstance(key, str) and key.startswith("/posting/") and isinstance(value, dict):
+        if key.startswith("/posting/") and isinstance(value, dict):
             return value
     return None
 

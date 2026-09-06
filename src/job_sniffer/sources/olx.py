@@ -23,6 +23,7 @@ from job_sniffer.sources._text import (
     html_to_text,
     join_unique,
 )
+from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
 from job_sniffer.sources.browser import (
     BrowserFetchError,
     fetch_with_existing_browser,
@@ -43,12 +44,14 @@ class OlxJobSource:
         page_load_timeout_seconds: float = 5.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
         stop_event: threading.Event | None = None,
+        duplicate_checker: DuplicateChecker | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
         self.page_load_timeout_seconds = page_load_timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
         self.stop_event = stop_event
+        self.duplicate_checker = duplicate_checker
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -61,13 +64,15 @@ class OlxJobSource:
         logger.info("Built OLX search URL: %s", url)
         return self._collect_offers_with_browser(url, limit=search.limit)
 
-    def _collect_offers_with_browser(self, url: str, *, limit: int) -> list[JobOffer]:
+    def _collect_offers_with_browser(self, url: str, *, limit: int | None) -> list[JobOffer]:
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
             html_text = self._fetch_listing_html(driver, url)
             offers = parse_olx_offers(html_text)
-            logger.info("Parsed %s OLX offers", len(offers))
-            return [self._enrich_offer_from_detail(driver, offer) for offer in offers[:limit]]
+            new_offers = filter_new_offers(offers, self.duplicate_checker)
+            logger.info("Parsed %s OLX offers, %s were new", len(offers), len(new_offers))
+            limited_offers = new_offers if limit is None else new_offers[:limit]
+            return [self._enrich_offer_from_detail(driver, offer) for offer in limited_offers]
         finally:
             logger.info("Closing OLX browser session")
             driver.quit()

@@ -10,10 +10,11 @@ from typing import Any
 import flet as ft
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from job_sniffer.database import SaveStats, connect, init_db, save_offer
+from job_sniffer.database import SaveStats, connect, init_db, offer_exists, save_offer
 from job_sniffer.models import JobOffer, JobSearch
-from job_sniffer.sources.base import JobSource
+from job_sniffer.sources.base import DuplicateChecker, JobSource
 from job_sniffer.sources.browser import BrowserFetchError
 from job_sniffer.sources.bulldogjob import BulldogjobSource
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
@@ -43,6 +44,7 @@ def build_shell(page: ft.Page) -> ft.Control:
     )
     limit = ft.TextField(
         label="Limit",
+        hint_text="Optional; empty means all offers from the source",
         value="5",
         keyboard_type=ft.KeyboardType.NUMBER,
     )
@@ -77,12 +79,15 @@ def build_shell(page: ft.Page) -> ft.Control:
         location_value = (location.value or "").strip()
         source_key = (source.value or "").strip()
 
-        try:
-            limit_value = int(limit.value or "0")
-        except ValueError:
-            limit_value = 0
+        limit_text = (limit.value or "").strip()
+        limit_value: int | None = None
+        if limit_text:
+            try:
+                limit_value = int(limit_text)
+            except ValueError:
+                limit_value = 0
 
-        if not source_key or limit_value < 1:
+        if not source_key or limit_value is not None and limit_value < 1:
             logger.warning(
                 "Invalid scan form values: source=%r keywords=%r location=%r limit=%r",
                 source.value,
@@ -90,7 +95,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                 location.value,
                 limit.value,
             )
-            status.value = "Choose a source and provide a positive limit."
+            status.value = "Choose a source and optionally provide a positive limit."
             page.update()
             return
 
@@ -138,33 +143,67 @@ def build_shell(page: ft.Page) -> ft.Control:
         logger.info("Fetching offers: source=%s", source_key)
         if stop_event.is_set():
             raise RuntimeError("Scan cancelled because the application is closing.")
-        offers = _create_source(source_key, stop_event=stop_event).search(search)
-        offer_list = list(offers)
-        if stop_event.is_set():
-            raise RuntimeError("Scan cancelled because the application is closing.")
-        logger.info("Fetched %s offers from %s, saving to db", len(offer_list), source_key)
-        inserted_offers, stats = _save_offers(offer_list, source_key=source_key)
-        return inserted_offers, stats
 
-    def _save_offers(
-        offers: list[JobOffer], *, source_key: str
-    ) -> tuple[list[JobOffer], SaveStats]:
         session = connect(Path("job_sniffer.sqlite"))
         try:
             logger.info("Initializing SQLite schema")
             init_db(session)
-            logger.info("Saving offers: source=%s", source_key)
-            inserted_offers = [offer for offer in offers if save_offer(session, offer)]
-            seen = len(offers)
-            stats = SaveStats(
-                seen=seen,
-                inserted=len(inserted_offers),
-                duplicates=seen - len(inserted_offers),
+
+            pre_enrich_duplicates = 0
+
+            def duplicate_checker(offer: JobOffer) -> bool:
+                nonlocal pre_enrich_duplicates
+                exists = offer_exists(session, offer)
+                if exists:
+                    pre_enrich_duplicates += 1
+                return exists
+
+            offers = _create_source(
+                source_key,
+                stop_event=stop_event,
+                duplicate_checker=duplicate_checker,
+            ).search(search)
+            offer_list = list(offers)
+            if stop_event.is_set():
+                raise RuntimeError("Scan cancelled because the application is closing.")
+            logger.info("Fetched %s new offers from %s, saving to db", len(offer_list), source_key)
+            inserted_offers, stats = _save_offers(
+                offer_list,
+                source_key=source_key,
+                session=session,
             )
-            return inserted_offers, stats
+            return inserted_offers, _include_pre_enrich_duplicates(
+                stats,
+                pre_enrich_duplicates,
+            )
         finally:
             logger.info("Closing SQLite session")
             session.close()
+
+    def _save_offers(
+        offers: list[JobOffer], *, source_key: str, session: Session
+    ) -> tuple[list[JobOffer], SaveStats]:
+        logger.info("Saving offers: source=%s", source_key)
+        inserted_offers = [offer for offer in offers if save_offer(session, offer)]
+        seen = len(offers)
+        stats = SaveStats(
+            seen=seen,
+            inserted=len(inserted_offers),
+            duplicates=seen - len(inserted_offers),
+        )
+        return inserted_offers, stats
+
+    def _include_pre_enrich_duplicates(
+        stats: SaveStats,
+        duplicates: int,
+    ) -> SaveStats:
+        if duplicates == 0:
+            return stats
+        return SaveStats(
+            seen=stats.seen + duplicates,
+            inserted=stats.inserted,
+            duplicates=stats.duplicates + duplicates,
+        )
 
     def _show_results(
         offers: list[JobOffer],
@@ -222,17 +261,22 @@ def build_shell(page: ft.Page) -> ft.Control:
     )
 
 
-def _create_source(source_key: str, *, stop_event: threading.Event) -> JobSource:
+def _create_source(
+    source_key: str,
+    *,
+    stop_event: threading.Event,
+    duplicate_checker: DuplicateChecker | None = None,
+) -> JobSource:
     if source_key == "pracuj":
-        return PracujJobSource(stop_event=stop_event)
+        return PracujJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
     if source_key == "olx":
-        return OlxJobSource(stop_event=stop_event)
+        return OlxJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
     if source_key == "theprotocol":
-        return TheProtocolJobSource(stop_event=stop_event)
+        return TheProtocolJobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
     if source_key == "nofluffjobs":
-        return NoFluffJobsSource(stop_event=stop_event)
+        return NoFluffJobsSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
     if source_key == "bulldogjob":
-        return BulldogjobSource(stop_event=stop_event)
+        return BulldogjobSource(stop_event=stop_event, duplicate_checker=duplicate_checker)
     raise ValueError(f"Unsupported source: {source_key}")
 
 

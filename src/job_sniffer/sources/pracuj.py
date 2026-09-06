@@ -23,6 +23,7 @@ from job_sniffer.sources._text import (
     format_bullet_sections,
     join_unique,
 )
+from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
 from job_sniffer.sources.browser import (
     BrowserFetchError,
     accept_cookies_if_visible,
@@ -64,12 +65,14 @@ class PracujJobSource:
         cloudflare_wait_seconds: float = 45.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
         stop_event: threading.Event | None = None,
+        duplicate_checker: DuplicateChecker | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.selenium_wait_seconds = selenium_wait_seconds
         self.cloudflare_wait_seconds = cloudflare_wait_seconds
         self.detail_delay_seconds = detail_delay_seconds
         self.stop_event = stop_event
+        self.duplicate_checker = duplicate_checker
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -80,9 +83,19 @@ class PracujJobSource:
         )
         url = build_search_url(search)
         logger.info("Built Pracuj.pl search URL: %s", url)
-        return self._collect_offers_with_selenium(url, limit=search.limit)
+        return self._collect_offers_with_selenium(
+            url,
+            location=search.location,
+            limit=search.limit,
+        )
 
-    def _collect_offers_with_selenium(self, url: str, *, limit: int) -> list[JobOffer]:
+    def _collect_offers_with_selenium(
+        self,
+        url: str,
+        *,
+        location: str,
+        limit: int | None,
+    ) -> list[JobOffer]:
         try:
             driver = start_undetected_chrome(self.chrome_user_data_dir)
         except BrowserFetchError as error:
@@ -107,10 +120,14 @@ class PracujJobSource:
             listing_html = str(driver.page_source)
             logger.info("Parsing Pracuj.pl page payload")
             offers = parse_pracuj_offers(listing_html, source_name=self.source_name)
-            limited_offers = offers[:limit]
+            matching_offers = _filter_by_location(offers, location)
+            new_offers = filter_new_offers(matching_offers, self.duplicate_checker)
+            limited_offers = new_offers if limit is None else new_offers[:limit]
             logger.info(
-                "Parsed %s Pracuj.pl offers, enriching %s detail pages",
+                "Parsed %s Pracuj.pl offers, %s matched location, %s were new, enriching %s detail pages",
                 len(offers),
+                len(matching_offers),
+                len(new_offers),
                 len(limited_offers),
             )
             return [self._enrich_offer_from_detail(driver, offer) for offer in limited_offers]
@@ -341,6 +358,41 @@ def _map_offer(
         posted_at=_clean(group.get("lastPublicated")),
         raw=raw,
     )
+
+
+def _filter_by_location(offers: list[JobOffer], location: str) -> list[JobOffer]:
+    if is_poland_location(location):
+        return offers
+    return [
+        offer
+        for offer in offers
+        if not _is_multi_location_variant(offer) or _location_matches(offer.location, location)
+    ]
+
+
+def _is_multi_location_variant(offer: JobOffer) -> bool:
+    group = offer.raw.get("group")
+    if not isinstance(group, dict):
+        return False
+    nested_offers = group.get("offers")
+    return isinstance(nested_offers, list) and len(nested_offers) > 1
+
+
+def _location_matches(offer_location: str | None, requested_location: str) -> bool:
+    offer_key = _location_key(offer_location)
+    requested_key = _location_key(requested_location)
+    if not offer_key or not requested_key:
+        return False
+    return requested_key in offer_key
+
+
+def _location_key(location: str | None) -> str:
+    if not location:
+        return ""
+    value = location.casefold().translate(str.maketrans("ł", "l"))
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "-", value).strip("-")
 
 
 def _extract_detail_fields(payload: dict[str, Any]) -> dict[str, str]:

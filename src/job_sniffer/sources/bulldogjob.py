@@ -22,6 +22,7 @@ from job_sniffer.sources._text import (
     format_bullet_sections,
     join_unique,
 )
+from job_sniffer.sources.base import DuplicateChecker, filter_new_offers
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,12 @@ class BulldogjobSource:
         timeout_seconds: float = 30.0,
         detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
         stop_event: threading.Event | None = None,
+        duplicate_checker: DuplicateChecker | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
         self.stop_event = stop_event
+        self.duplicate_checker = duplicate_checker
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -56,8 +59,9 @@ class BulldogjobSource:
         )
         response.raise_for_status()
         offers = parse_bulldogjob_offers(response.text)
-        logger.info("Parsed %s Bulldogjob offers", len(offers))
-        limited_offers = offers[: search.limit]
+        new_offers = filter_new_offers(offers, self.duplicate_checker)
+        logger.info("Parsed %s Bulldogjob offers, %s were new", len(offers), len(new_offers))
+        limited_offers = new_offers if search.limit is None else new_offers[: search.limit]
         return [self._enrich_offer_from_detail(offer) for offer in limited_offers]
 
     def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer:

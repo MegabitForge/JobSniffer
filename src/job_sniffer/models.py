@@ -12,7 +12,7 @@ class JobSearch:
 
     keywords: str
     location: str
-    limit: int = 25
+    limit: int | None = None
 
 
 @dataclass(frozen=True)

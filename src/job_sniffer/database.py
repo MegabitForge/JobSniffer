@@ -111,6 +111,11 @@ def save_offer(session: Session, offer: JobOffer) -> bool:
     return True
 
 
+def offer_exists(session: Session, offer: JobOffer) -> bool:
+    """Return True when an offer would be treated as a duplicate."""
+    return _exists(session, offer, _normalize(offer.title), _normalize(offer.company))
+
+
 def _exists(
     session: Session,
     offer: JobOffer,
