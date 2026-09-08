@@ -28,3 +28,5 @@ dist/
 Thumbs.db
 
 codebook.toml
+.*-profile
+*.sqlite

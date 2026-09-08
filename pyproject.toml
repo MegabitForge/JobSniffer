@@ -26,6 +26,10 @@ dependencies = [
     "pymupdf",
     "pymupdf4llm",
     "selectolax",
+    "selenium>=4.47.0",
+    "setuptools>=84.0.0",
+    "sqlalchemy>=2.0.52",
+    "undetected-chromedriver>=3.5.5",
 ]
 
 [project.scripts]
@@ -46,10 +50,6 @@ packages = ["src/job_sniffer"]
 path = "src"
 module = "main"
 
-[tool.pytest.ini_options]
-addopts = "-ra"
-testpaths = ["tests"]
-
 [tool.ruff]
 line-length = 100
 target-version = "py314"
@@ -58,3 +58,12 @@ target-version = "py314"
 python_version = "3.14"
 packages = ["job_sniffer"]
 strict = true
+
+[tool.basedpyright]
+typeCheckingMode = "strict"
+
+reportAny = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportMissingTypeStubs = false
