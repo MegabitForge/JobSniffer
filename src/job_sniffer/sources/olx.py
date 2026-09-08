@@ -153,14 +153,15 @@ class OlxJobSource:
             wait_until=lambda browser: self._is_stopped() or _browser_has_olx_detail(browser),
         )
 
-    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer:
+    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
-            return offer
+            logger.warning("Skipping OLX offer without a detail URL: %s", offer.title)
+            return None
 
         delay = random.uniform(*self.detail_delay_seconds)
         logger.info("Waiting %.1fs before OLX detail fetch: %s", delay, offer.url)
         if self.stop_event and self.stop_event.wait(delay):
-            return offer
+            self._raise_if_stopped()
 
         try:
             detail = parse_olx_offer_detail(self._fetch_detail_html(driver, offer.url))
@@ -168,21 +169,23 @@ class OlxJobSource:
             raise
         except BrowserFetchError, TypeError, ValueError, WebDriverException:
             logger.exception("Could not enrich OLX offer from detail page: %s", offer.url)
-            return offer
+            return None
 
         raw_detail = detail.get("raw")
         description_text = detail.get("description_text")
+        cleaned_description = (
+            clean_multiline(description_text) if isinstance(description_text, str) else None
+        )
+        if not cleaned_description:
+            logger.warning("No description found on OLX detail page: %s", offer.url)
+            return None
         return replace(
             offer,
             title=_clean(detail.get("title")) or offer.title,
             company=_clean(detail.get("company")) or offer.company,
             location=_clean(detail.get("location")) or offer.location,
             salary=offer.salary or _clean(detail.get("salary")),
-            description_text=(
-                clean_multiline(description_text)
-                if isinstance(description_text, str)
-                else offer.description_text
-            ),
+            description_text=cleaned_description,
             posted_at=_clean(detail.get("posted_at")) or offer.posted_at,
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
@@ -196,12 +199,12 @@ class OlxJobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
-    keyword = quote("-".join(search.keywords.casefold().split()))
+    keyword = quote("-".join(search.keywords.casefold().split()), safe="")
     if not is_poland_location(search.location):
         location = _slugify_location(search.location)
         if not keyword:
-            return f"https://www.olx.pl/praca/{quote(location)}/"
-        return f"https://www.olx.pl/praca/{quote(location)}/q-{keyword}/"
+            return f"https://www.olx.pl/praca/{quote(location, safe='')}/"
+        return f"https://www.olx.pl/praca/{quote(location, safe='')}/q-{keyword}/"
     if not keyword:
         return "https://www.olx.pl/praca/"
     return f"https://www.olx.pl/praca/q-{keyword}/"

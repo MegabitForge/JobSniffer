@@ -66,7 +66,7 @@ class PracujBlockedError(RuntimeError):
 
 
 class PracujJobSource:
-    source_name = "pracuj.pl"
+    source_name = "pracuj"
 
     def __init__(
         self,
@@ -197,10 +197,10 @@ class PracujJobSource:
             logger.info("Waited %.1fs before Pracuj.pl listing page %s", delay, page)
         self._raise_if_stopped()
 
-    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer:
+    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
             logger.info("Skipping Pracuj.pl detail page because offer has no URL: %s", offer.title)
-            return offer
+            return None
 
         delay = random.uniform(*self.detail_delay_seconds)
         logger.info(
@@ -229,7 +229,7 @@ class PracujJobSource:
                     "Browser was closed during scan. Stopping current scan."
                 ) from error
             logger.exception("Could not enrich Pracuj.pl offer from detail page: %s", offer.url)
-            return offer
+            return None
         except (
             PracujBlockedError,
             TimeoutException,
@@ -237,11 +237,12 @@ class PracujJobSource:
             TypeError,
         ):
             logger.exception("Could not enrich Pracuj.pl offer from detail page: %s", offer.url)
-            return offer
+            return None
 
-        description_text = (
-            _clean_multiline(detail.get("description_text")) or offer.description_text
-        )
+        description_text = _clean_multiline(detail.get("description_text"))
+        if not description_text:
+            logger.warning("No description found on Pracuj.pl detail page: %s", offer.url)
+            return None
         salary = _clean(detail.get("salary")) or offer.salary
         logger.info(
             "Enriched Pracuj.pl offer detail: title=%r description_chars=%s",
@@ -298,7 +299,7 @@ class PracujJobSource:
 
 def build_search_url(search: JobSearch) -> str:
     location = _slugify_location(search.location)
-    keywords = quote(search.keywords.strip())
+    keywords = quote(search.keywords.strip(), safe="")
     if is_poland_location(location):
         return (
             f"https://www.pracuj.pl/praca/{keywords};kw"
@@ -322,7 +323,7 @@ def _with_page(url: str, page: int) -> str:
     )
 
 
-def parse_pracuj_offers(html_text: str, *, source_name: str = "pracuj.pl") -> list[JobOffer]:
+def parse_pracuj_offers(html_text: str, *, source_name: str = "pracuj") -> list[JobOffer]:
     """Parse Pracuj.pl offers from the Next.js payload embedded in HTML."""
     payload = _extract_next_data(html_text)
     grouped_offers = _iter_grouped_offers(payload)

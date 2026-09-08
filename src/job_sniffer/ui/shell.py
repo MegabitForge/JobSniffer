@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 ACTIVE_SOURCES = tuple(source for source in SOURCE_DEFINITIONS if source.status == "active")
 
 
+class ScanInterruptedError(RuntimeError):
+    """Report a failed scan together with offers already saved during it."""
+
+    def __init__(self, cause: Exception, offers: list[JobOffer], stats: SaveStats) -> None:
+        super().__init__(str(cause))
+        self.offers = offers
+        self.stats = stats
+
+
 def build_shell(page: ft.Page) -> ft.Control:
     """Build the initial application view."""
     stop_event = threading.Event()
@@ -52,6 +61,9 @@ def build_shell(page: ft.Page) -> ft.Control:
         value=ACTIVE_SOURCES[0].key if ACTIVE_SOURCES else None,
         options=[ft.dropdown.Option(key=item.key, text=item.name) for item in ACTIVE_SOURCES],
     )
+    keywords.disabled = source.value == "bulldogjob"
+    if keywords.disabled:
+        keywords.hint_text = "Not supported by Bulldogjob"
     status = ft.Text(
         "Ready to scan.",
     )
@@ -72,11 +84,19 @@ def build_shell(page: ft.Page) -> ft.Control:
         "Scan",
     )
 
+    def on_source_change(_: Any) -> None:
+        bulldogjob_selected = source.value == "bulldogjob"
+        keywords.disabled = bulldogjob_selected
+        keywords.hint_text = "Not supported by Bulldogjob" if bulldogjob_selected else None
+        page.update()
+
     async def on_scan_click(_: Any) -> None:
         logger.info("Scan initiated")
         keywords_value = (keywords.value or "").strip()
         location_value = (location.value or "").strip()
         source_key = (source.value or "").strip()
+        if source_key == "bulldogjob":
+            keywords_value = ""
 
         limit_text = (limit.value or "").strip()
         limit_value: int | None = None
@@ -113,6 +133,13 @@ def build_shell(page: ft.Page) -> ft.Control:
                 _scan_source,
                 source_key,
                 search,
+            )
+        except ScanInterruptedError as error:
+            logger.exception("Scan stopped after partial success: source=%s", source_key)
+            _show_offer_list(error.offers)
+            status.value = (
+                f"{_source_name(source_key)} scan stopped after saving "
+                f"{error.stats.inserted} offers. Reason: {error}"
             )
         except (
             BrowserFetchError,
@@ -181,12 +208,25 @@ def build_shell(page: ft.Page) -> ft.Control:
                     )
                 return inserted
 
-            _create_source(
-                source_key,
-                stop_event=stop_event,
-                duplicate_checker=duplicate_checker,
-                enriched_offer_handler=save_enriched_offer,
-            ).search(search)
+            try:
+                _create_source(
+                    source_key,
+                    stop_event=stop_event,
+                    duplicate_checker=duplicate_checker,
+                    enriched_offer_handler=save_enriched_offer,
+                ).search(search)
+            except Exception as error:
+                if not inserted_offers:
+                    raise
+                stats = _include_pre_enrich_duplicates(
+                    SaveStats(
+                        seen=save_seen,
+                        inserted=len(inserted_offers),
+                        duplicates=save_duplicates,
+                    ),
+                    pre_enrich_duplicates,
+                )
+                raise ScanInterruptedError(error, inserted_offers.copy(), stats) from error
             if stop_event.is_set():
                 raise RuntimeError("Scan cancelled because the application is closing.")
             logger.info("Saved %s enriched offers from %s", len(inserted_offers), source_key)
@@ -226,6 +266,9 @@ def build_shell(page: ft.Page) -> ft.Control:
             f"{action} {stats.seen} offers from {_source_name(source_key)}. "
             f"Inserted {stats.inserted}, skipped duplicates {stats.duplicates}."
         )
+        _show_offer_list(offers)
+
+    def _show_offer_list(offers: list[JobOffer]) -> None:
         results.controls[:] = [
             ft.Text(
                 f"{offer.title} - {offer.company}",
@@ -236,6 +279,7 @@ def build_shell(page: ft.Page) -> ft.Control:
             results.controls.append(ft.Text("No new offers found."))
 
     scan_button.on_click = on_scan_click
+    source.on_select = on_source_change
 
     def on_page_close(_: Any) -> None:
         logger.info("Application is closing, requesting scan shutdown")

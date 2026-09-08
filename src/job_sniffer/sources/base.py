@@ -64,18 +64,24 @@ def offer_listing_key(offer: JobOffer) -> tuple[str, str]:
         return (offer.source, f"id:{offer.external_id}")
     if offer.url:
         return (offer.source, f"url:{offer.url}")
-    return (offer.source, f"title-company:{offer.title.casefold()}|{offer.company.casefold()}")
+    location = offer.location.casefold() if offer.location else ""
+    return (
+        offer.source,
+        f"title-company-location:{offer.title.casefold()}|{offer.company.casefold()}|{location}",
+    )
 
 
 def process_enriched_offers(
     offers: Iterable[JobOffer],
-    enrich_offer: Callable[[JobOffer], JobOffer],
+    enrich_offer: Callable[[JobOffer], JobOffer | None],
     enriched_offer_handler: EnrichedOfferHandler | None,
 ) -> list[JobOffer]:
     """Enrich offers sequentially and optionally handle each one immediately."""
     result: list[JobOffer] = []
     for offer in offers:
         enriched_offer = enrich_offer(offer)
+        if enriched_offer is None:
+            continue
         if enriched_offer_handler is not None and not enriched_offer_handler(enriched_offer):
             continue
         result.append(enriched_offer)

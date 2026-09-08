@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -138,15 +139,35 @@ def _exists(
         if session.execute(statement).first() is not None:
             return True
 
-    statement = select(JobOfferRecord.id).where(
+    location_candidates = select(JobOfferRecord.source, JobOfferRecord.location).where(
         JobOfferRecord.title_norm == title_norm,
         JobOfferRecord.company_norm == company_norm,
     )
-    return session.execute(statement).first() is not None
+    for existing_source, existing_location in session.execute(location_candidates):
+        if _same_location(existing_location, offer.location):
+            return True
+        if existing_source == offer.source and not existing_location and not offer.location:
+            return True
+    return False
 
 
 def _normalize(value: str) -> str:
     return " ".join(value.casefold().split())
+
+
+def _same_location(left: str | None, right: str | None) -> bool:
+    left_key = _normalize_location(left)
+    right_key = _normalize_location(right)
+    return bool(left_key and right_key and left_key == right_key)
+
+
+def _normalize_location(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = value.casefold().translate(str.maketrans("ł", "l"))
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return " ".join("".join(char if char.isalnum() else " " for char in normalized).split())
 
 
 def _empty_to_none(value: str | None) -> str | None:

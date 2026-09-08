@@ -136,9 +136,10 @@ class NoFluffJobsSource:
         response.raise_for_status()
         return _extract_listing_data_from_state(response.text)
 
-    def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer:
+    def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
-            return offer
+            logger.warning("Skipping NoFluffJobs offer without a detail URL: %s", offer.title)
+            return None
 
         delay = random.uniform(*self.detail_delay_seconds)
         logger.info("Waiting %.1fs before NoFluffJobs detail fetch: %s", delay, offer.url)
@@ -157,10 +158,11 @@ class NoFluffJobsSource:
             detail = parse_nofluffjobs_offer_detail(response.text)
         except httpx.HTTPError, TypeError, ValueError:
             logger.exception("Could not enrich NoFluffJobs offer from detail page: %s", offer.url)
-            return offer
+            return None
         description_text = detail.get("description_text")
         if not isinstance(description_text, str) or not description_text.strip():
-            return offer
+            logger.warning("No description found on NoFluffJobs detail page: %s", offer.url)
+            return None
 
         raw_detail = detail.get("raw")
         return replace(

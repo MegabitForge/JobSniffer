@@ -116,9 +116,10 @@ class BulldogjobSource:
             logger.info("Waited %.1fs before Bulldogjob listing page %s", delay, page)
         self._raise_if_stopped()
 
-    def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer:
+    def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
-            return offer
+            logger.warning("Skipping Bulldogjob offer without a detail URL: %s", offer.title)
+            return None
 
         delay = random.uniform(*self.detail_delay_seconds)
         logger.info("Waiting %.1fs before Bulldogjob detail fetch: %s", delay, offer.url)
@@ -137,21 +138,23 @@ class BulldogjobSource:
             detail = parse_bulldogjob_offer_detail(response.text)
         except httpx.HTTPError, TypeError, ValueError:
             logger.exception("Could not enrich Bulldogjob offer from detail page: %s", offer.url)
-            return offer
+            return None
 
         raw_detail = detail.get("raw")
         description_text = detail.get("description_text")
+        cleaned_description = (
+            clean_multiline(description_text) if isinstance(description_text, str) else None
+        )
+        if not cleaned_description:
+            logger.warning("No description found on Bulldogjob detail page: %s", offer.url)
+            return None
         return replace(
             offer,
             title=_clean(detail.get("title")) or offer.title,
             company=_clean(detail.get("company")) or offer.company,
             location=_clean(detail.get("location")) or offer.location,
             salary=_clean(detail.get("salary")) or offer.salary,
-            description_text=(
-                clean_multiline(description_text)
-                if isinstance(description_text, str)
-                else offer.description_text
-            ),
+            description_text=cleaned_description,
             posted_at=_clean(detail.get("posted_at")) or offer.posted_at,
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
@@ -442,7 +445,7 @@ def _slugify_location(location: str) -> str:
     value = unicodedata.normalize("NFKD", value)
     value = "".join(char for char in value if not unicodedata.combining(char))
     value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
-    return value.title()
+    return value
 
 
 def _clean(value: Any) -> str | None:

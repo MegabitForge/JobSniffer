@@ -144,9 +144,10 @@ class TheProtocolJobSource:
         self._raise_if_stopped()
         return html_text
 
-    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer:
+    def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
-            return offer
+            logger.warning("Skipping TheProtocol offer without a detail URL: %s", offer.title)
+            return None
 
         self._raise_if_stopped()
 
@@ -161,11 +162,12 @@ class TheProtocolJobSource:
             raise
         except BrowserFetchError, TypeError, ValueError:
             logger.exception("Could not parse TheProtocol detail page: %s", offer.url)
-            return offer
+            return None
 
         description_text = detail.get("description_text")
         if not isinstance(description_text, str) or not description_text.strip():
-            return offer
+            logger.warning("No description found on TheProtocol detail page: %s", offer.url)
+            return None
 
         raw_detail = detail.get("raw")
         return replace(
