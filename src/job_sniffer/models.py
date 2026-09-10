@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -29,3 +30,17 @@ class JobOffer:
     description_text: str | None
     posted_at: str | None
     raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class JobOfferEvaluation:
+    """Evaluation of a job offer against a candidate's CV."""
+
+    offer_id: int | None
+    fit_score: int
+    verdict: str
+    summary: str
+    strengths: list[str]
+    weaknesses: list[str]
+    raw_response: dict[str, Any] | None = None
+    evaluated_at: datetime | None = None

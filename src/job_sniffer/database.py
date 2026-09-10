@@ -1,4 +1,4 @@
-"""SQLAlchemy persistence for job offers."""
+"""SQLAlchemy persistence for job offers and their AI evaluations."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, Engine, Index, String, Text, create_engine, select
+from sqlalchemy import JSON, Engine, ForeignKey, Index, Integer, String, Text, create_engine, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
-from job_sniffer.models import JobOffer
+from job_sniffer.models import JobOffer, JobOfferEvaluation
 
 
 class Base(DeclarativeBase):
@@ -38,6 +38,35 @@ class JobOfferRecord(Base):
     title_norm: Mapped[str] = mapped_column(String, nullable=False)
     company_norm: Mapped[str] = mapped_column(String, nullable=False)
     scraped_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
+
+    evaluation: Mapped[JobOfferEvaluationRecord | None] = relationship(
+        "JobOfferEvaluationRecord",
+        back_populates="offer",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class JobOfferEvaluationRecord(Base):
+    """Persisted evaluation of a job offer against candidate CV."""
+
+    __tablename__ = "job_offer_evaluations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    offer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("job_offers.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    verdict: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    strengths: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    weaknesses: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    offer: Mapped[JobOfferRecord] = relationship("JobOfferRecord", back_populates="evaluation")
 
 
 _ = Index(
@@ -80,36 +109,112 @@ def init_db(session: Session) -> None:
     Base.metadata.create_all(bind)
 
 
-def save_offer(session: Session, offer: JobOffer) -> bool:
-    """Save an offer; return False when it is already present."""
+def save_offer(session: Session, offer: JobOffer) -> int | None:
+    """Save an offer; return inserted record ID or None if already present."""
     title_norm = _normalize(offer.title)
     company_norm = _normalize(offer.company)
 
     if _exists(session, offer, title_norm, company_norm):
-        return False
+        return None
 
-    session.add(
-        JobOfferRecord(
-            source=offer.source,
-            external_id=_empty_to_none(offer.external_id),
-            title=offer.title,
-            company=offer.company,
-            location=offer.location,
-            url=_empty_to_none(offer.url),
-            salary=offer.salary,
-            description_text=offer.description_text,
-            posted_at=offer.posted_at,
-            raw_json=offer.raw,
-            title_norm=title_norm,
-            company_norm=company_norm,
-        )
+    record = JobOfferRecord(
+        source=offer.source,
+        external_id=_empty_to_none(offer.external_id),
+        title=offer.title,
+        company=offer.company,
+        location=offer.location,
+        url=_empty_to_none(offer.url),
+        salary=offer.salary,
+        description_text=offer.description_text,
+        posted_at=offer.posted_at,
+        raw_json=offer.raw,
+        title_norm=title_norm,
+        company_norm=company_norm,
     )
+    session.add(record)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
-        return False
-    return True
+        return None
+    return record.id
+
+
+def save_evaluation(session: Session, evaluation: JobOfferEvaluation) -> int | None:
+    """Save or update evaluation for an offer."""
+    if evaluation.offer_id is None:
+        return None
+
+    existing = session.execute(
+        select(JobOfferEvaluationRecord).where(
+            JobOfferEvaluationRecord.offer_id == evaluation.offer_id
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        existing.fit_score = evaluation.fit_score
+        existing.verdict = evaluation.verdict
+        existing.summary = evaluation.summary
+        existing.strengths = evaluation.strengths
+        existing.weaknesses = evaluation.weaknesses
+        existing.raw_response = evaluation.raw_response
+        existing.evaluated_at = evaluation.evaluated_at or datetime.now(UTC)
+        record = existing
+    else:
+        record = JobOfferEvaluationRecord(
+            offer_id=evaluation.offer_id,
+            fit_score=evaluation.fit_score,
+            verdict=evaluation.verdict,
+            summary=evaluation.summary,
+            strengths=evaluation.strengths,
+            weaknesses=evaluation.weaknesses,
+            raw_response=evaluation.raw_response,
+            evaluated_at=evaluation.evaluated_at or datetime.now(UTC),
+        )
+        session.add(record)
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return None
+    return record.id
+
+
+def get_evaluation(session: Session, offer_id: int) -> JobOfferEvaluation | None:
+    """Retrieve evaluation for a specific offer."""
+    record = session.execute(
+        select(JobOfferEvaluationRecord).where(JobOfferEvaluationRecord.offer_id == offer_id)
+    ).scalar_one_or_none()
+    if not record:
+        return None
+    return JobOfferEvaluation(
+        offer_id=record.offer_id,
+        fit_score=record.fit_score,
+        verdict=record.verdict,
+        summary=record.summary,
+        strengths=record.strengths,
+        weaknesses=record.weaknesses,
+        raw_response=record.raw_response,
+        evaluated_at=record.evaluated_at,
+    )
+
+
+def list_offers_with_evaluations(
+    session: Session, limit: int = 50
+) -> list[tuple[JobOfferRecord, JobOfferEvaluationRecord | None]]:
+    """Retrieve recent offers with their evaluations."""
+    statement = (
+        select(JobOfferRecord, JobOfferEvaluationRecord)
+        .outerjoin(
+            JobOfferEvaluationRecord,
+            JobOfferRecord.id == JobOfferEvaluationRecord.offer_id,
+        )
+        .order_by(JobOfferRecord.id.desc())
+        .limit(limit)
+    )
+    results = session.execute(statement).all()
+    return [(row[0], row[1]) for row in results]
 
 
 def offer_exists(session: Session, offer: JobOffer) -> bool:
