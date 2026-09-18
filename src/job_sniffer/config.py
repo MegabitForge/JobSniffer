@@ -17,7 +17,7 @@ EngineType = Literal["llama_cpp", "ollama"]
 
 def default_models_directory() -> str:
     """Return default models storage directory in user app data."""
-    return str(Path(platformdirs.user_data_dir("job-sniffer")) / "models")
+    return str(Path(platformdirs.user_data_dir('job-sniffer',appauthor=False)) / "models")
 
 
 def config_file_path() -> Path:
@@ -37,6 +37,8 @@ class AppConfig(BaseModel):
     llama_server_port: int = 8080
     cv_path: str | None = None
     auto_evaluate: bool = True
+    use_gpu: bool = True
+    gpu_layers: int = 99
 
 
 def load_config() -> AppConfig:
@@ -48,16 +50,18 @@ def load_config() -> AppConfig:
             data = json.loads(raw_text)
             return AppConfig.model_validate(data)
         except (OSError, json.JSONDecodeError, ValueError) as error:
-            logger.warning("Failed to load config from %s: %s; using defaults", path, error)
-    return AppConfig()
+            logger.warning("Failed to parse config file: %s. Using defaults.", error)
+
+    default_config = AppConfig()
+    save_config(default_config)
+    return default_config
 
 
 def save_config(config: AppConfig) -> None:
-    """Save configuration to disk."""
+    """Persist configuration to disk as formatted JSON."""
     path = config_file_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
         logger.info("Saved configuration to %s", path)
-    except (OSError, ValueError) as error:
-        logger.error("Failed to save config to %s: %s", path, error)
+    except OSError as error:
+        logger.error("Failed to save configuration to %s: %s", path, error)

@@ -6,26 +6,23 @@ import json
 import re
 from typing import Any
 
-EVALUATION_SYSTEM_PROMPT = """Jesteś obiektywnym, precyzyjnym ekspertem rekrutacji IT i doradcą kariery.
-Twoim zadaniem jest ocena dopasowania CV kandydata do oferty pracy.
+EVALUATION_SYSTEM_PROMPT = """Jesteś ekspertem rekrutacji IT. Porównujesz ofertę pracy z CV kandydata.
 
-Wymagania dotyczące odpowiedzi:
-1. Odpowiedz WYŁĄCZNIE w formacie czystego JSON (bez dodatkowego wstępu czy zakończenia).
-2. JSON musi mieć dokładnie poniższe pola:
+Zasady:
+1. OFERTA to wymagania pracodawcy. MOJE CV to profil kandydata. Nie myl ich ról.
+2. Zwróć uwagę na faktyczne, twarde wymagania techniczne z oferty (must-have vs nice-to-have, stack, seniority) ale nie ignoruj wymagań miękkich.
+3. fit_score (0-100): realna szansa na zaproszenie na rozmowę rekrutacyjną (bądź bardzo rygorystyczny) i zwracaj uwagę na tytuł stanowiska i jego wymagania i używaj pełnej skali (10% kąpletnie się nie nadaje, 20% ma jedną z kluczowych umiejętności, 30% ma połowę z kluczowych, 50% ma wszystkie kluczowe, 60% ma solidniejsze umiejętności kluczowe, 70% ma też większość z mile widzianych, 90% ma wszystko idealny kandydat, 100% ma rodzinę w tej firmie).
+4. strengths: technologie i doświadczenia z CV pokrywające wymagania oferty.
+5. weaknesses: kluczowe wymagania z oferty, których brak w CV kandydata lub też braki w wymaganiach miękkich.
+
+Zwróć wyłącznie JSON:
 {
-  "fit_score": <liczba całkowita od 0 do 100, szansa na dostanie się lub odpowiedź na aplikację>,
-  "verdict": "<krótki werdykt, np. 'Wysoka szansa - silne dopasowanie profilu' lub 'Umiarkowana szansa' lub 'Niska szansa'>",
-  "summary": "<2-3 zdaniowe zwięzłe podsumowanie: kogo poszukuje pracodawca, jakie są kluczowe technologie i zakres roli>",
-  "strengths": [
-    "<konkretna mocna strona kandydata z CV względem wymagań w ofercie>",
-    "<kolejna mocna strona...>"
-  ],
-  "weaknesses": [
-    "<konkretny brak technologiczny, brakujące doświadczenie lub rozbieżność względem wymagań>",
-    "<kolejny brak...>"
-  ]
-}
-"""
+  "summary": "Zwięzłe podsumowanie profilu oferty i kluczowych technologii (parę słów)",
+  "strengths": ["mocna strona z CV pokrywająca ofertę"],
+  "weaknesses": ["brak kandydata względem wymagań oferty"],
+  "verdict": "Krótki opis werdyktu dopasowania (2-3 zdania)",
+  "fit_score": 0
+}"""
 
 
 def build_evaluation_user_prompt(
@@ -34,31 +31,26 @@ def build_evaluation_user_prompt(
     job_description: str | None,
     job_company: str,
 ) -> str:
-    """Build user message containing job details and candidate CV."""
+    """Build concise user prompt clearly delineating job offer requirements from candidate CV."""
     desc = (job_description or "").strip()
     if not desc:
-        desc = (
-            "(Brak szczegółowego opisu oferty pracy - oceń na podstawie tytułu stanowiska i firmy)"
-        )
+        desc = "Brak szczegółowego opisu (dokonaj szacunku na podstawie tytułu i firmy)."
     else:
-        desc = desc[:5000]
+        desc = desc[:4000]
 
-    cv_excerpt = cv_text.strip()[:6000]
+    cv_excerpt = cv_text.strip()[:5000]
 
-    return f"""### OFERTA PRACY:
+    return f"""OFERTA PRACY:
 Stanowisko: {job_title}
 Firma: {job_company}
-
-Opis i wymagania:
+Wymagania i opis:
 {desc}
 
----
-
-### CV KANDYDATA:
+MOJE CV:
 {cv_excerpt}
 
----
-Przeanalizuj ofertę i CV, a następnie zwróć ocenę wyłącznie jako poprawny obiekt JSON."""
+Zadanie:
+Oceń dopasowanie MOJEGO CV do faktycznych wymagań OFERTY PRACY. Zwróć JSON."""
 
 
 def parse_evaluation_json(raw_text: str) -> dict[str, Any]:

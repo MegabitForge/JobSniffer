@@ -15,7 +15,12 @@ from job_sniffer.llm.catalog import ModelOption
 
 logger = logging.getLogger(__name__)
 
-LLAMA_SERVER_ZIP_URL = "https://github.com/ggerganov/llama.cpp/releases/download/b10900/llama-b10900-bin-win-cpu-x64.zip"
+LLAMA_SERVER_VULKAN_ZIP_URL = (
+    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-vulkan-x64.zip"
+)
+LLAMA_SERVER_CPU_ZIP_URL = (
+    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cpu-x64.zip"
+)
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -63,24 +68,33 @@ async def download_file_with_progress(
 
 async def ensure_llama_server(
     models_dir: Path,
+    use_gpu: bool = True,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
-    """Ensure llama-server.exe is downloaded and extracted."""
+    """Ensure llama-server.exe is downloaded and extracted, with GPU support if enabled."""
     bin_dir = models_dir / "bin"
     server_exe = bin_dir / "llama-server.exe"
+    vulkan_dll = bin_dir / "ggml-vulkan.dll"
 
-    if server_exe.is_file():
-        logger.info("llama-server.exe already present at %s", server_exe)
+    # Check if existing installation matches requested GPU mode
+    if server_exe.is_file() and (not use_gpu or vulkan_dll.is_file()):
+        logger.info("llama-server.exe already present and configured (gpu=%s)", use_gpu)
         return server_exe
 
     bin_dir.mkdir(parents=True, exist_ok=True)
     zip_path = bin_dir / "llama-server.zip"
+    download_url = LLAMA_SERVER_VULKAN_ZIP_URL if use_gpu else LLAMA_SERVER_CPU_ZIP_URL
 
+    msg = (
+        "Pobieranie silnika AI z akceleracją GPU (Vulkan)..."
+        if use_gpu
+        else "Pobieranie silnika AI (CPU)..."
+    )
     if progress_callback:
-        progress_callback(0.0, "Pobieranie silnika llama-server.exe...")
+        progress_callback(0.0, msg)
 
     await download_file_with_progress(
-        LLAMA_SERVER_ZIP_URL,
+        download_url,
         zip_path,
         progress_callback=progress_callback,
     )
@@ -97,30 +111,25 @@ async def ensure_llama_server(
             zip_path.unlink()
 
     await loop.run_in_executor(None, _extract)
-
-    if not server_exe.is_file():
-        raise RuntimeError(f"Failed to find llama-server.exe after extracting {zip_path}")
-
-    logger.info("llama-server.exe extracted to %s", server_exe)
     return server_exe
 
 
 async def ensure_gguf_model(
-    model: ModelOption,
+    model_option: ModelOption,
     models_dir: Path,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
-    """Ensure GGUF model file is downloaded."""
-    model_path = models_dir / model.gguf_filename
+    """Ensure selected GGUF model file is downloaded and verified."""
+    model_path = models_dir / model_option.gguf_filename
     if model_path.is_file() and model_path.stat().st_size > 10 * 1024 * 1024:
-        logger.info("GGUF model already present at %s", model_path)
+        logger.info("Model file already present at %s", model_path)
         return model_path
 
     if progress_callback:
-        progress_callback(0.0, f"Pobieranie modelu {model.name}...")
+        progress_callback(0.0, f"Pobieranie modelu {model_option.name}...")
 
     await download_file_with_progress(
-        model.gguf_url,
+        model_option.gguf_url,
         model_path,
         progress_callback=progress_callback,
     )
@@ -128,32 +137,27 @@ async def ensure_gguf_model(
 
 
 async def pull_ollama_model(
-    model: ModelOption,
-    host: str = "http://127.0.0.1:11434",
+    model_option: ModelOption,
+    host: str,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
-    """Pull model into Ollama instance with progress updates."""
+    """Pull model via Ollama daemon API with streaming progress."""
+    logger.info("Pulling model %s on Ollama host %s", model_option.ollama_tag, host)
     client = ollama.AsyncClient(host=host)
-    logger.info("Initiating Ollama pull for model tag: %s", model.ollama_tag)
 
     if progress_callback:
-        progress_callback(0.0, f"Pobieranie modelu {model.ollama_tag} przez Ollama...")
+        progress_callback(0.0, f"Pobieranie modelu {model_option.ollama_tag} w Ollama...")
 
-    response = await client.pull(model=model.ollama_tag, stream=True)
-    async for item in response:
-        status_text = getattr(item, "status", "") or "Pobieranie..."
-        total = getattr(item, "total", 0) or 0
-        completed = getattr(item, "completed", 0) or 0
-        fraction = (completed / total) if total > 0 else 0.0
-
-        if progress_callback:
-            if total > 0:
-                mb_c = completed / (1024 * 1024)
-                mb_t = total / (1024 * 1024)
-                msg = f"{status_text} - {mb_c:.1f} MB / {mb_t:.1f} MB ({fraction * 100:.0f}%)"
-            else:
-                msg = status_text
-            progress_callback(fraction, msg)
+    stream = await client.pull(model=model_option.ollama_tag, stream=True)
+    async for chunk in stream:
+        status = chunk.get("status", "")
+        completed = chunk.get("completed", 0)
+        total = chunk.get("total", 0)
+        if total > 0 and progress_callback:
+            frac = completed / total
+            progress_callback(frac, f"{status} ({frac * 100:.0f}%)")
+        elif progress_callback and status:
+            progress_callback(0.0, status)
 
     if progress_callback:
-        progress_callback(1.0, f"Model {model.ollama_tag} jest gotowy w Ollama.")
+        progress_callback(1.0, f"Model {model_option.ollama_tag} jest gotowy w Ollama.")

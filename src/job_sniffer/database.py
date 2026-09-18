@@ -200,10 +200,37 @@ def get_evaluation(session: Session, offer_id: int) -> JobOfferEvaluation | None
     )
 
 
+def get_offer_by_id(session: Session, offer_id: int) -> JobOfferRecord | None:
+    """Retrieve a single job offer by primary key."""
+    return session.get(JobOfferRecord, offer_id)
+
+
+def delete_offer(session: Session, offer_id: int) -> bool:
+    """Delete an offer and its associated evaluation."""
+    record = session.get(JobOfferRecord, offer_id)
+    if record is None:
+        return False
+    session.delete(record)
+    session.commit()
+    return True
+
+
+def delete_evaluation(session: Session, offer_id: int) -> bool:
+    """Delete only the AI evaluation for a specific offer, leaving the offer intact."""
+    eval_rec = session.execute(
+        select(JobOfferEvaluationRecord).where(JobOfferEvaluationRecord.offer_id == offer_id)
+    ).scalar_one_or_none()
+    if eval_rec is None:
+        return False
+    session.delete(eval_rec)
+    session.commit()
+    return True
+
+
 def list_offers_with_evaluations(
-    session: Session, limit: int = 50
+    session: Session, limit: int | None = None
 ) -> list[tuple[JobOfferRecord, JobOfferEvaluationRecord | None]]:
-    """Retrieve recent offers with their evaluations."""
+    """Retrieve recent or all offers with their evaluations."""
     statement = (
         select(JobOfferRecord, JobOfferEvaluationRecord)
         .outerjoin(
@@ -211,10 +238,29 @@ def list_offers_with_evaluations(
             JobOfferRecord.id == JobOfferEvaluationRecord.offer_id,
         )
         .order_by(JobOfferRecord.id.desc())
-        .limit(limit)
     )
+    if limit is not None:
+        statement = statement.limit(limit)
     results = session.execute(statement).all()
     return [(row[0], row[1]) for row in results]
+
+
+def list_unevaluated_offers(
+    session: Session, limit: int | None = None
+) -> list[JobOfferRecord]:
+    """Retrieve job offers that do not yet have an AI evaluation."""
+    statement = (
+        select(JobOfferRecord)
+        .outerjoin(
+            JobOfferEvaluationRecord,
+            JobOfferRecord.id == JobOfferEvaluationRecord.offer_id,
+        )
+        .where(JobOfferEvaluationRecord.offer_id.is_(None))
+        .order_by(JobOfferRecord.id.desc())
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
+    return list(session.scalars(statement).all())
 
 
 def offer_exists(session: Session, offer: JobOffer) -> bool:

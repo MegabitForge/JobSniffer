@@ -15,12 +15,18 @@ from job_sniffer.config import AppConfig, load_config, save_config
 from job_sniffer.database import (
     SaveStats,
     connect,
+    delete_evaluation,
+    delete_offer,
+    get_evaluation,
+    get_offer_by_id,
     init_db,
     list_offers_with_evaluations,
+    list_unevaluated_offers,
     offer_exists,
     save_offer,
 )
 from job_sniffer.llm.catalog import AVAILABLE_MODELS, get_model_by_id
+from job_sniffer.llm.hardware import detect_gpu, format_gpu_summary
 from job_sniffer.models import JobOffer, JobOfferEvaluation, JobSearch
 from job_sniffer.services import EvaluationService
 from job_sniffer.sources.base import DuplicateChecker, EnrichedOfferHandler, JobSource
@@ -47,7 +53,7 @@ class ScanInterruptedError(RuntimeError):
 
 
 def build_shell(page: ft.Page) -> ft.Control:
-    """Build the application UI shell with Scanner, LLM/CV Configuration, and Sources tabs."""
+    """Build the application UI shell with persistent offers, delete/re-evaluate buttons, and dynamic navigation."""
     config: AppConfig = load_config()
     evaluation_service = EvaluationService(config)
 
@@ -79,6 +85,16 @@ def build_shell(page: ft.Page) -> ft.Control:
     scan_button = ft.ElevatedButton("Skanuj oferty", icon=ft.Icons.SEARCH)
     offers_column = ft.Column(spacing=12, scroll=ft.ScrollMode.ADAPTIVE, expand=True)
 
+    # Background AI status controls
+    ai_status_text = ft.Text("", size=13, weight=ft.FontWeight.W_500, color=ft.Colors.BLUE_800)
+    ai_progress_ring = ft.ProgressRing(width=16, height=16, stroke_width=2)
+    ai_status_row = ft.Row([ai_progress_ring, ai_status_text], visible=False, spacing=8)
+
+    # Active offer cards mapped by offer_id to allow dynamic non-blocking live updates
+    offer_cards_by_id: dict[int, ft.Card] = {}
+    force_eval_ids: set[int] = set()
+    failed_eval_ids: set[int] = set()
+
     def on_source_change(_: Any) -> None:
         bulldogjob_selected = source.value == "bulldogjob"
         keywords.disabled = bulldogjob_selected
@@ -87,8 +103,59 @@ def build_shell(page: ft.Page) -> ft.Control:
 
     source.on_select = on_source_change
 
-    # Offer card rendering
-    def build_offer_card(
+    def handle_delete_offer(offer_id: int) -> None:
+        """Delete an offer from database and remove its card from the UI."""
+        try:
+            with connect(Path("job_sniffer.sqlite")) as session:
+                deleted = delete_offer(session, offer_id)
+        except (SQLAlchemyError, OSError) as del_err:
+            logger.warning("Failed to delete offer %s: %s", offer_id, del_err)
+            return
+
+        if deleted:
+            card = offer_cards_by_id.pop(offer_id, None)
+            if card is not None and card in offers_column.controls:
+                offers_column.controls.remove(card)
+            scan_status.value = "Oferta została pomyślnie usunięta."
+            page.update()
+
+    async def handle_re_evaluate_offer(offer_id: int) -> None:
+        """Reset existing AI evaluation and re-run analysis in the background."""
+        if not evaluation_service.get_cv_text():
+            ai_status_text.value = "Najpierw wybierz plik CV w zakładce 'Konfiguracja LLM & CV'."
+            ai_status_row.visible = True
+            page.update()
+            return
+
+        rec = None
+        try:
+            with connect(Path("job_sniffer.sqlite")) as session:
+                delete_evaluation(session, offer_id)
+                rec = get_offer_by_id(session, offer_id)
+        except (SQLAlchemyError, OSError) as reset_err:
+            logger.warning("Failed to reset evaluation for offer %s: %s", offer_id, reset_err)
+            return
+
+        if rec is not None and offer_id in offer_cards_by_id:
+            card = offer_cards_by_id[offer_id]
+            card.content = build_card_inner(
+                title=rec.title,
+                company=rec.company,
+                offer_location=rec.location,
+                salary=rec.salary,
+                url=rec.url,
+                source_name=rec.source,
+                evaluation=None,
+                offer_id=offer_id,
+                pending_evaluation=True,
+            )
+            card.update()
+
+        force_eval_ids.add(offer_id)
+        failed_eval_ids.discard(offer_id)
+        await trigger_evaluations([offer_id])
+
+    def build_card_inner(
         title: str,
         company: str,
         offer_location: str | None,
@@ -96,7 +163,10 @@ def build_shell(page: ft.Page) -> ft.Control:
         url: str | None,
         source_name: str | None = None,
         evaluation: JobOfferEvaluation | None = None,
-    ) -> ft.Card:
+        offer_id: int | None = None,
+        pending_evaluation: bool = False,
+        evaluation_failed: bool = False,
+    ) -> ft.Container:
         details_row = ft.Row(
             controls=[
                 ft.Text(f"🏢 {company}", weight=ft.FontWeight.BOLD),
@@ -107,12 +177,45 @@ def build_shell(page: ft.Page) -> ft.Control:
             spacing=16,
         )
 
-        url_button: ft.Control = ft.Container()
+        action_controls: list[ft.Control] = []
         if url:
-            url_button = ft.TextButton(
-                "Otwórz ofertę w przeglądarce 🔗",
-                url=url,
+            action_controls.append(
+                ft.TextButton(
+                    "Otwórz ofertę w przeglądarce 🔗",
+                    url=url,
+                )
             )
+        else:
+            action_controls.append(ft.Container())
+
+        if offer_id is not None:
+            action_controls.append(
+                ft.Row(
+                    controls=[
+                        ft.IconButton(
+                            icon=ft.Icons.REPLAY,
+                            icon_color=ft.Colors.BLUE_700,
+                            tooltip="Zresetuj ocenę AI i przeanalizuj tę ofertę ponownie",
+                            on_click=lambda _, oid=offer_id: asyncio.create_task(
+                                handle_re_evaluate_offer(oid)
+                            ),
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            icon_color=ft.Colors.RED_500,
+                            tooltip="Usuń tę ofertę z listy",
+                            on_click=lambda _, oid=offer_id: handle_delete_offer(oid),
+                        ),
+                    ],
+                    spacing=2,
+                    tight=True,
+                )
+            )
+
+        actions_row = ft.Row(
+            controls=action_controls,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
 
         eval_controls: list[ft.Control] = []
         if evaluation:
@@ -126,7 +229,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                     [
                         ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.WHITE, size=18),
                         ft.Text(
-                            f"Szansa: {evaluation.fit_score}% | {evaluation.verdict}",
+                            f"Szansa na odpowiedź: {evaluation.fit_score}% | {evaluation.verdict}",
                             color=ft.Colors.WHITE,
                             weight=ft.FontWeight.BOLD,
                             size=13,
@@ -155,7 +258,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                     ft.Column(
                         controls=[
                             ft.Text(
-                                "Mocne strony kandydata względem oferty:",
+                                "Mocne strony kandydata (pokrycie wymagań z oferty):",
                                 weight=ft.FontWeight.BOLD,
                                 size=13,
                                 color=ft.Colors.GREEN_800,
@@ -184,7 +287,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                     ft.Column(
                         controls=[
                             ft.Text(
-                                "Luki / brakujące kompetencje:",
+                                "Luki i braki względem faktycznych wymagań oferty:",
                                 weight=ft.FontWeight.BOLD,
                                 size=13,
                                 color=ft.Colors.RED_800,
@@ -207,6 +310,36 @@ def build_shell(page: ft.Page) -> ft.Control:
                         spacing=3,
                     )
                 )
+        elif pending_evaluation:
+            eval_controls.append(
+                ft.Row(
+                    [
+                        ft.ProgressRing(width=16, height=16, stroke_width=2),
+                        ft.Text(
+                            "Oczekiwanie na analizę dopasowania przez AI w tle...",
+                            size=12,
+                            color=ft.Colors.BLUE_700,
+                            italic=True,
+                        ),
+                    ],
+                    spacing=8,
+                )
+            )
+        elif evaluation_failed:
+            eval_controls.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.AMBER_800, size=16),
+                        ft.Text(
+                            "Ocena AI nie powiodła się. Kliknij 'Oceń nie ocenione' lub ikonę powtórzenia, aby spróbować ponownie.",
+                            size=12,
+                            color=ft.Colors.AMBER_900,
+                            italic=True,
+                        ),
+                    ],
+                    spacing=6,
+                )
+            )
         else:
             eval_controls.append(
                 ft.Text(
@@ -217,35 +350,63 @@ def build_shell(page: ft.Page) -> ft.Control:
                 )
             )
 
-        return ft.Card(
-            content=ft.Container(
-                content=ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text(title, size=16, weight=ft.FontWeight.BOLD, expand=True),
-                                ft.Text(f"[{source_name}]" if source_name else "", size=12),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        ),
-                        details_row,
-                        url_button,
-                        ft.Divider(),
-                        *eval_controls,
-                    ],
-                    spacing=8,
-                ),
-                padding=14,
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Text(title, size=16, weight=ft.FontWeight.BOLD, expand=True),
+                            ft.Text(f"[{source_name}]" if source_name else "", size=12),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    details_row,
+                    actions_row,
+                    ft.Divider(),
+                    *eval_controls,
+                ],
+                spacing=8,
             ),
+            padding=14,
         )
 
+    def build_offer_card(
+        title: str,
+        company: str,
+        offer_location: str | None,
+        salary: str | None,
+        url: str | None,
+        source_name: str | None = None,
+        evaluation: JobOfferEvaluation | None = None,
+        offer_id: int | None = None,
+        pending_evaluation: bool = False,
+        evaluation_failed: bool = False,
+    ) -> ft.Card:
+        inner = build_card_inner(
+            title=title,
+            company=company,
+            offer_location=offer_location,
+            salary=salary,
+            url=url,
+            source_name=source_name,
+            evaluation=evaluation,
+            offer_id=offer_id,
+            pending_evaluation=pending_evaluation,
+            evaluation_failed=evaluation_failed,
+        )
+        card = ft.Card(content=inner)
+        if offer_id is not None:
+            offer_cards_by_id[offer_id] = card
+        return card
+
     def load_saved_offers_into_ui() -> None:
-        """Load recent saved offers and evaluations from SQLite into the results list."""
+        """Load all previous saved offers and evaluations from SQLite into the results list."""
         try:
             with connect(Path("job_sniffer.sqlite")) as session:
                 init_db(session)
-                rows = list_offers_with_evaluations(session, limit=25)
+                rows = list_offers_with_evaluations(session, limit=None)
                 offers_column.controls.clear()
+                offer_cards_by_id.clear()
                 for offer_rec, eval_rec in rows:
                     evaluation: JobOfferEvaluation | None = None
                     if eval_rec is not None:
@@ -259,26 +420,140 @@ def build_shell(page: ft.Page) -> ft.Control:
                             raw_response=eval_rec.raw_response,
                             evaluated_at=eval_rec.evaluated_at,
                         )
-                    offers_column.controls.append(
-                        build_offer_card(
-                            title=offer_rec.title,
-                            company=offer_rec.company,
-                            offer_location=offer_rec.location,
-                            salary=offer_rec.salary,
-                            url=offer_rec.url,
-                            source_name=offer_rec.source,
-                            evaluation=evaluation,
-                        )
+                    card = build_offer_card(
+                        title=offer_rec.title,
+                        company=offer_rec.company,
+                        offer_location=offer_rec.location,
+                        salary=offer_rec.salary,
+                        url=offer_rec.url,
+                        source_name=offer_rec.source,
+                        evaluation=evaluation,
+                        offer_id=offer_rec.id,
+                        pending_evaluation=False,
                     )
+                    offers_column.controls.append(card)
         except (SQLAlchemyError, OSError) as err:
             logger.warning("Failed to preload existing offers: %s", err)
 
     load_saved_offers_into_ui()
 
-    # Scanning logic
+    # Background async AI evaluation worker
+    eval_queue: asyncio.Queue[int] = asyncio.Queue()
+    eval_in_progress = False
+
+    async def run_eval_worker() -> None:
+        nonlocal eval_in_progress
+        if eval_in_progress:
+            return
+        eval_in_progress = True
+        ai_status_row.visible = True
+        ai_progress_ring.visible = True
+        page.update()
+
+        try:
+            while not eval_queue.empty():
+                if stop_event.is_set():
+                    break
+                offer_id = await eval_queue.get()
+                remaining = eval_queue.qsize() + 1
+                ai_status_text.value = f"AI ocenia oferty w tle (pozostało: {remaining})..."
+                page.update()
+
+                session = connect(Path("job_sniffer.sqlite"))
+                offer_record = None
+                try:
+                    offer_record = get_offer_by_id(session, offer_id)
+                    if offer_record is None:
+                        continue
+
+                    existing_eval = get_evaluation(session, offer_id)
+                    if existing_eval is not None and offer_id not in force_eval_ids:
+                        if offer_id in offer_cards_by_id:
+                            card = offer_cards_by_id[offer_id]
+                            card.content = build_card_inner(
+                                title=offer_record.title,
+                                company=offer_record.company,
+                                offer_location=offer_record.location,
+                                salary=offer_record.salary,
+                                url=offer_record.url,
+                                source_name=offer_record.source,
+                                evaluation=existing_eval,
+                                offer_id=offer_id,
+                                pending_evaluation=False,
+                            )
+                            card.update()
+                        continue
+
+                    force_eval_ids.discard(offer_id)
+                    evaluation = await evaluation_service.evaluate_offer(
+                        offer_record, offer_id, session
+                    )
+                    is_failed = evaluation is None
+                    if is_failed:
+                        failed_eval_ids.add(offer_id)
+                    else:
+                        failed_eval_ids.discard(offer_id)
+
+                    if offer_id in offer_cards_by_id:
+                        card = offer_cards_by_id[offer_id]
+                        card.content = build_card_inner(
+                            title=offer_record.title,
+                            company=offer_record.company,
+                            offer_location=offer_record.location,
+                            salary=offer_record.salary,
+                            url=offer_record.url,
+                            source_name=offer_record.source,
+                            evaluation=evaluation,
+                            offer_id=offer_id,
+                            pending_evaluation=False,
+                            evaluation_failed=is_failed,
+                        )
+                        card.update()
+                except (SQLAlchemyError, RuntimeError, ValueError, TypeError, OSError) as eval_err:
+                    logger.warning("Error evaluating offer %s: %s", offer_id, eval_err)
+                    failed_eval_ids.add(offer_id)
+                    if offer_id in offer_cards_by_id and offer_record is not None:
+                        card = offer_cards_by_id[offer_id]
+                        card.content = build_card_inner(
+                            title=offer_record.title,
+                            company=offer_record.company,
+                            offer_location=offer_record.location,
+                            salary=offer_record.salary,
+                            url=offer_record.url,
+                            source_name=offer_record.source,
+                            evaluation=None,
+                            offer_id=offer_id,
+                            pending_evaluation=False,
+                            evaluation_failed=True,
+                        )
+                        card.update()
+                finally:
+                    session.close()
+
+            ai_status_text.value = "AI: Wszystkie oczekujące oferty zostały ocenione."
+            ai_progress_ring.visible = False
+            page.update()
+            await asyncio.sleep(3.5)
+            if eval_queue.empty():
+                ai_status_row.visible = False
+                ai_progress_ring.visible = True
+                page.update()
+        finally:
+            eval_in_progress = False
+
+    async def trigger_evaluations(offer_ids: list[int]) -> None:
+        """Enqueue offer IDs for background evaluation without blocking searches."""
+        if not offer_ids:
+            return
+        for oid in offer_ids:
+            await eval_queue.put(oid)
+        if not eval_in_progress:
+            asyncio.create_task(run_eval_worker())
+
+    # Scanning logic (strictly non-blocking: saves immediately, never calls LLM synchronously)
     def _scan_source(
         source_key: str, search: JobSearch
-    ) -> tuple[list[tuple[JobOffer, JobOfferEvaluation | None]], SaveStats]:
+    ) -> tuple[list[tuple[JobOffer, int]], SaveStats]:
         logger.info("Fetching offers: source=%s", source_key)
         if stop_event.is_set():
             raise RuntimeError("Scan cancelled because the application is closing.")
@@ -297,7 +572,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                     pre_enrich_duplicates += 1
                 return exists
 
-            saved_results: list[tuple[JobOffer, JobOfferEvaluation | None]] = []
+            saved_results: list[tuple[JobOffer, int]] = []
             save_seen = 0
             save_duplicates = 0
 
@@ -314,17 +589,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                         offer.company,
                         inserted_id,
                     )
-                    evaluation: JobOfferEvaluation | None = None
-                    if config.auto_evaluate:
-                        try:
-                            # Evaluate offer against candidate CV using LLM
-                            evaluation = asyncio.run(
-                                evaluation_service.evaluate_offer(offer, inserted_id, session)
-                            )
-                        except (SQLAlchemyError, RuntimeError, ValueError) as e_err:
-                            logger.warning("Automatic evaluation failed: %s", e_err)
-
-                    saved_results.append((offer, evaluation))
+                    saved_results.append((offer, inserted_id))
                     return True
 
                 save_duplicates += 1
@@ -404,10 +669,11 @@ def build_shell(page: ft.Page) -> ft.Control:
         scan_button.disabled = True
         stop_event.clear()
         scan_status.value = f"Skanowanie {_source_name(source_key)}..."
-        offers_column.controls.clear()
         page.update()
 
         search = JobSearch(keywords=keywords_value, location=location_value, limit=limit_value)
+        newly_inserted_ids: list[int] = []
+
         try:
             loop = asyncio.get_running_loop()
             results, stats = await loop.run_in_executor(
@@ -439,24 +705,35 @@ def build_shell(page: ft.Page) -> ft.Control:
                 f"Pobrano {stats.seen} ofert z {_source_name(source_key)}. "
                 f"Zapisano {stats.inserted}, pominięto duplikaty: {stats.duplicates}."
             )
-            offers_column.controls.clear()
-            for offer_obj, eval_obj in results:
-                offers_column.controls.append(
-                    build_offer_card(
-                        title=offer_obj.title,
-                        company=offer_obj.company,
-                        offer_location=offer_obj.location,
-                        salary=offer_obj.salary,
-                        url=offer_obj.url,
-                        source_name=offer_obj.source,
-                        evaluation=eval_obj,
-                    )
+            can_eval = config.auto_evaluate and bool(evaluation_service.get_cv_text())
+
+            # Prepend new offers to the existing list so previous offers are always preserved
+            for offer_obj, inserted_id in reversed(results):
+                newly_inserted_ids.append(inserted_id)
+                card = build_offer_card(
+                    title=offer_obj.title,
+                    company=offer_obj.company,
+                    offer_location=offer_obj.location,
+                    salary=offer_obj.salary,
+                    url=offer_obj.url,
+                    source_name=offer_obj.source,
+                    evaluation=None,
+                    offer_id=inserted_id,
+                    pending_evaluation=can_eval,
                 )
+                offers_column.controls.insert(0, card)
+
             if not offers_column.controls:
-                offers_column.controls.append(ft.Text("Nie znaleziono żadnych nowych ofert."))
+                offers_column.controls.append(ft.Text("Brak zapisanych ofert pracy."))
         finally:
+            # Re-enable scanning immediately so user is never blocked
             scan_button.disabled = False
             page.update()
+
+        # Trigger AI evaluation on the newly saved offers at the very end in the background
+        if config.auto_evaluate and newly_inserted_ids and evaluation_service.get_cv_text():
+            logger.info("Enqueuing %s offers for background AI evaluation", len(newly_inserted_ids))
+            await trigger_evaluations(newly_inserted_ids)
 
     scan_button.on_click = on_scan_click
 
@@ -465,9 +742,69 @@ def build_shell(page: ft.Page) -> ft.Control:
         page.update()
 
     refresh_button = ft.OutlinedButton(
-        "Odśwież zapisane oferty",
+        "Odśwież listę",
         icon=ft.Icons.REFRESH,
         on_click=on_refresh_click,
+    )
+
+    async def on_eval_pending_click(_: Any) -> None:
+        if not evaluation_service.get_cv_text():
+            ai_status_text.value = "Najpierw wybierz plik CV w zakładce 'Konfiguracja LLM & CV'."
+            ai_status_row.visible = True
+            page.update()
+            return
+
+        with connect(Path("job_sniffer.sqlite")) as session:
+            unevaluated = list_unevaluated_offers(session, limit=None)
+            pending_ids = [item.id for item in unevaluated]
+
+        # Dołącz również oferty, w których ocena zakończyła się wcześniej błędem
+        for fid in list(failed_eval_ids):
+            if fid not in pending_ids:
+                pending_ids.append(fid)
+
+        if not pending_ids:
+            ai_status_text.value = "Wszystkie oferty w bazie posiadają już ocenę."
+            ai_status_row.visible = True
+            page.update()
+            await asyncio.sleep(2.5)
+            ai_status_row.visible = False
+            page.update()
+            return
+
+        # Mark controls as pending and force re-evaluation
+        for pid in pending_ids:
+            force_eval_ids.add(pid)
+            failed_eval_ids.discard(pid)
+            if pid in offer_cards_by_id:
+                c = offer_cards_by_id[pid]
+                with connect(Path("job_sniffer.sqlite")) as session:
+                    rec = get_offer_by_id(session, pid)
+                    if rec:
+                        c.content = build_card_inner(
+                            title=rec.title,
+                            company=rec.company,
+                            offer_location=rec.location,
+                            salary=rec.salary,
+                            url=rec.url,
+                            source_name=rec.source,
+                            evaluation=None,
+                            offer_id=pid,
+                            pending_evaluation=True,
+                            evaluation_failed=False,
+                        )
+                        c.update()
+
+        ai_status_text.value = f"AI: Rozpoczęto ocenę {len(pending_ids)} nieocenionych ofert..."
+        ai_status_row.visible = True
+        page.update()
+        await trigger_evaluations(pending_ids)
+
+    eval_pending_btn = ft.OutlinedButton(
+        "Oceń nie ocenione",
+        icon=ft.Icons.AUTO_AWESOME,
+        tooltip="Przeanalizuj wszystkie oferty, które nie mają oceny lub których ocena zakończyła się błędem",
+        on_click=on_eval_pending_click,
     )
 
     # Scanner View
@@ -478,14 +815,21 @@ def build_shell(page: ft.Page) -> ft.Control:
                     controls=[
                         ft.Row([keywords, location], spacing=12),
                         ft.Row([limit, source], spacing=12),
-                        ft.Row([scan_button, refresh_button, scan_status], spacing=12),
+                        ft.Row(
+                            [scan_button, refresh_button, eval_pending_btn, scan_status],
+                            spacing=12,
+                            wrap=True,
+                        ),
+                        ai_status_row,
                     ],
                     spacing=10,
                 ),
                 border_radius=10,
                 padding=12,
             ),
-            ft.Text("Oferty pracy i ocena dopasowania CV:", size=16, weight=ft.FontWeight.BOLD),
+            ft.Text(
+                "Zapisane oferty pracy i ocena dopasowania CV:", size=16, weight=ft.FontWeight.BOLD
+            ),
             offers_column,
         ],
         spacing=12,
@@ -527,6 +871,32 @@ def build_shell(page: ft.Page) -> ft.Control:
         icon=ft.Icons.ATTACH_FILE,
         on_click=on_pick_cv_click,
     )
+
+    # Hardware / GPU detection
+    gpu_info = detect_gpu()
+    gpu_status_icon = ft.Icon(
+        ft.Icons.MEMORY,
+        color=ft.Colors.GREEN_700 if gpu_info.has_gpu else ft.Colors.GREY_600,
+        size=22,
+    )
+    gpu_status_text = ft.Text(
+        format_gpu_summary(gpu_info),
+        size=13,
+        weight=ft.FontWeight.W_500,
+    )
+    gpu_status_row = ft.Row([gpu_status_icon, gpu_status_text], spacing=8)
+
+    gpu_checkbox = ft.Checkbox(
+        label="Używaj akceleracji karty graficznej (GPU - znacznie szybsza analiza)",
+        value=config.use_gpu,
+        disabled=not gpu_info.has_gpu,
+    )
+
+    def on_gpu_change(_: Any) -> None:
+        config.use_gpu = bool(gpu_checkbox.value)
+        save_config(config)
+
+    gpu_checkbox.on_change = on_gpu_change
 
     # LLM settings
     engine_dropdown = ft.Dropdown(
@@ -597,7 +967,7 @@ def build_shell(page: ft.Page) -> ft.Control:
     )
 
     auto_eval_checkbox = ft.Checkbox(
-        label="Automatycznie oceniaj oferty w tle podczas skanowania",
+        label="Automatycznie oceniaj oferty w tle po zakończeniu skanowania",
         value=config.auto_evaluate,
     )
 
@@ -693,6 +1063,8 @@ def build_shell(page: ft.Page) -> ft.Control:
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
                             ),
+                            gpu_status_row,
+                            gpu_checkbox,
                             engine_dropdown,
                             ft.Row([model_dropdown], spacing=10),
                             model_desc_text,
@@ -750,25 +1122,44 @@ def build_shell(page: ft.Page) -> ft.Control:
 
     content_area = ft.Container(content=scanner_view, expand=True)
 
-    tab_scanner_btn = ft.FilledButton("Skaner & Oferty", icon=ft.Icons.SEARCH)
-    tab_llm_btn = ft.OutlinedButton("Konfiguracja LLM & CV", icon=ft.Icons.PSYCHOLOGY)
-    tab_sources_btn = ft.OutlinedButton("Źródła", icon=ft.Icons.LANGUAGE)
+    # Navigation buttons with dynamic active state highlighting
+    tab_scanner_btn = ft.ElevatedButton("Skaner & Oferty", icon=ft.Icons.SEARCH)
+    tab_llm_btn = ft.ElevatedButton("Konfiguracja LLM & CV", icon=ft.Icons.PSYCHOLOGY)
+    tab_sources_btn = ft.ElevatedButton("Źródła", icon=ft.Icons.LANGUAGE)
 
-    def switch_to_scanner(_: Any) -> None:
-        content_area.content = scanner_view
+    def set_active_tab(tab_name: str) -> None:
+        """Switch views and update header button colors to highlight the active tab."""
+        is_scanner = tab_name == "scanner"
+        is_llm = tab_name == "llm"
+        is_sources = tab_name == "sources"
+
+        tab_scanner_btn.bgcolor = ft.Colors.BLUE_700 if is_scanner else ft.Colors.GREY_200
+        tab_scanner_btn.color = ft.Colors.WHITE if is_scanner else ft.Colors.BLACK87
+        tab_scanner_btn.elevation = 3 if is_scanner else 0
+
+        tab_llm_btn.bgcolor = ft.Colors.BLUE_700 if is_llm else ft.Colors.GREY_200
+        tab_llm_btn.color = ft.Colors.WHITE if is_llm else ft.Colors.BLACK87
+        tab_llm_btn.elevation = 3 if is_llm else 0
+
+        tab_sources_btn.bgcolor = ft.Colors.BLUE_700 if is_sources else ft.Colors.GREY_200
+        tab_sources_btn.color = ft.Colors.WHITE if is_sources else ft.Colors.BLACK87
+        tab_sources_btn.elevation = 3 if is_sources else 0
+
+        if is_scanner:
+            content_area.content = scanner_view
+        elif is_llm:
+            content_area.content = llm_settings_view
+        elif is_sources:
+            content_area.content = sources_view
+
         page.update()
 
-    def switch_to_llm(_: Any) -> None:
-        content_area.content = llm_settings_view
-        page.update()
+    tab_scanner_btn.on_click = lambda _: set_active_tab("scanner")
+    tab_llm_btn.on_click = lambda _: set_active_tab("llm")
+    tab_sources_btn.on_click = lambda _: set_active_tab("sources")
 
-    def switch_to_sources(_: Any) -> None:
-        content_area.content = sources_view
-        page.update()
-
-    tab_scanner_btn.on_click = switch_to_scanner
-    tab_llm_btn.on_click = switch_to_llm
-    tab_sources_btn.on_click = switch_to_sources
+    # Initialize active styling on Scanner tab
+    set_active_tab("scanner")
 
     def on_page_close(_: Any) -> None:
         logger.info("Application is closing, shutting down workers and server")

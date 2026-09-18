@@ -19,6 +19,8 @@ def test_config_save_and_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         selected_model_id="qwen2.5-7b-instruct",
         cv_path=str(tmp_path / "my_cv.pdf"),
         auto_evaluate=False,
+        use_gpu=True,
+        gpu_layers=99,
     )
     save_config(cfg)
 
@@ -29,3 +31,5 @@ def test_config_save_and_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert loaded.selected_model_id == "qwen2.5-7b-instruct"
     assert loaded.cv_path == str(tmp_path / "my_cv.pdf")
     assert loaded.auto_evaluate is False
+    assert loaded.use_gpu is True
+    assert loaded.gpu_layers == 99
