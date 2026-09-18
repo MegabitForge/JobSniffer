@@ -35,7 +35,11 @@ class OllamaProvider(LLMProvider):
                 if self.model in m_name or m_name in self.model:
                     return True
             return True
-        except ollama.ResponseError, httpx.HTTPError, OSError:
+        except ollama.ResponseError:
+            return False
+        except httpx.HTTPError:
+            return False
+        except OSError:
             return False
 
     async def evaluate_match(
@@ -70,6 +74,7 @@ class OllamaProvider(LLMProvider):
         fit_score = int(parsed.get("fit_score", 50))
         fit_score = max(0, min(100, fit_score))
         verdict = str(parsed.get("verdict", "Brak jednoznacznego werdyktu"))
+        explanation = str(parsed.get("explanation", ""))
         summary = str(parsed.get("summary", ""))
         strengths = [str(s) for s in parsed.get("strengths", [])]
         weaknesses = [str(w) for w in parsed.get("weaknesses", [])]
@@ -77,6 +82,7 @@ class OllamaProvider(LLMProvider):
         return MatchEvaluationResult(
             fit_score=fit_score,
             verdict=verdict,
+            explanation=explanation,
             summary=summary,
             strengths=strengths,
             weaknesses=weaknesses,

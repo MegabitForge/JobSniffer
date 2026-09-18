@@ -39,6 +39,7 @@ class JobOfferEvaluation:
     offer_id: int | None
     fit_score: int
     verdict: str
+    explanation: str
     summary: str
     strengths: list[str]
     weaknesses: list[str]

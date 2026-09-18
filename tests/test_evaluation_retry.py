@@ -33,7 +33,8 @@ async def test_evaluate_offer_retries_once_and_succeeds(tmp_path: Path) -> None:
             RuntimeError("Simulated LLM network timeout"),
             MatchEvaluationResult(
                 fit_score=92,
-                verdict="Świetne dopasowanie",
+                explanation="Test explanation",
+                    verdict="Świetne dopasowanie",
                 summary="Bardzo dobry profil",
                 strengths=["Python", "FastAPI"],
                 weaknesses=[],

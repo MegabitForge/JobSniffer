@@ -40,7 +40,8 @@ def test_save_and_retrieve_evaluation(tmp_path: Path) -> None:
         eval_data = JobOfferEvaluation(
             offer_id=offer_id,
             fit_score=88,
-            verdict="Wysoka szansa na rozmowę",
+            explanation="Test explanation",
+                    verdict="Wysoka szansa na rozmowę",
             summary="Stanowisko skupione na backendzie i mikroserwisach.",
             strengths=["5+ lat w Pythonie", "Architektura mikroserwisów"],
             weaknesses=["Brak znajomości GCP"],
@@ -105,7 +106,8 @@ def test_list_unevaluated_offers(tmp_path: Path) -> None:
             JobOfferEvaluation(
                 offer_id=id1,
                 fit_score=75,
-                verdict="Dobra szansa",
+                explanation="Test explanation",
+                    verdict="Dobra szansa",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],
@@ -143,7 +145,8 @@ def test_delete_offer_and_cascade_evaluation(tmp_path: Path) -> None:
             JobOfferEvaluation(
                 offer_id=oid,
                 fit_score=80,
-                verdict="OK",
+                explanation="Test explanation",
+                    verdict="OK",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],
@@ -186,7 +189,8 @@ def test_delete_evaluation_only(tmp_path: Path) -> None:
             JobOfferEvaluation(
                 offer_id=oid,
                 fit_score=50,
-                verdict="Średnia",
+                explanation="Test explanation",
+                    verdict="Średnia",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],

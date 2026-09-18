@@ -58,6 +58,7 @@ class JobOfferEvaluationRecord(Base):
     )
     fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
     verdict: Mapped[str] = mapped_column(String, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     strengths: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     weaknesses: Mapped[list[str]] = mapped_column(JSON, nullable=False)
@@ -107,6 +108,15 @@ def init_db(session: Session) -> None:
     if not isinstance(bind, Engine):
         raise TypeError("init_db requires a Session bound to an Engine")
     Base.metadata.create_all(bind)
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+    try:
+        session.execute(text("ALTER TABLE job_offer_evaluations ADD COLUMN explanation TEXT NOT NULL DEFAULT '';"))
+        session.commit()
+    except OperationalError:
+        session.rollback()
+    
+
 
 
 def save_offer(session: Session, offer: JobOffer) -> int | None:
@@ -154,6 +164,7 @@ def save_evaluation(session: Session, evaluation: JobOfferEvaluation) -> int | N
     if existing:
         existing.fit_score = evaluation.fit_score
         existing.verdict = evaluation.verdict
+        existing.explanation = evaluation.explanation
         existing.summary = evaluation.summary
         existing.strengths = evaluation.strengths
         existing.weaknesses = evaluation.weaknesses
@@ -165,6 +176,7 @@ def save_evaluation(session: Session, evaluation: JobOfferEvaluation) -> int | N
             offer_id=evaluation.offer_id,
             fit_score=evaluation.fit_score,
             verdict=evaluation.verdict,
+            explanation=evaluation.explanation,
             summary=evaluation.summary,
             strengths=evaluation.strengths,
             weaknesses=evaluation.weaknesses,
@@ -192,6 +204,7 @@ def get_evaluation(session: Session, offer_id: int) -> JobOfferEvaluation | None
         offer_id=record.offer_id,
         fit_score=record.fit_score,
         verdict=record.verdict,
+        explanation=getattr(record, "explanation", ""),
         summary=record.summary,
         strengths=record.strengths,
         weaknesses=record.weaknesses,

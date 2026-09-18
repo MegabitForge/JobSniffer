@@ -13,6 +13,7 @@ class MatchEvaluationResult(BaseModel):
 
     fit_score: int = Field(ge=0, le=100)
     verdict: str
+    explanation: str = ""
     summary: str
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)

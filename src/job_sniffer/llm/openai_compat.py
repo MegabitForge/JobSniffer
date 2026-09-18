@@ -71,6 +71,7 @@ class OpenAICompatProvider(LLMProvider):
         fit_score = int(parsed.get("fit_score", 50))
         fit_score = max(0, min(100, fit_score))
         verdict = str(parsed.get("verdict", "Brak jednoznacznego werdyktu"))
+        explanation = str(parsed.get("explanation", ""))
         summary = str(parsed.get("summary", ""))
         strengths = [str(s) for s in parsed.get("strengths", [])]
         weaknesses = [str(w) for w in parsed.get("weaknesses", [])]
@@ -78,6 +79,7 @@ class OpenAICompatProvider(LLMProvider):
         return MatchEvaluationResult(
             fit_score=fit_score,
             verdict=verdict,
+            explanation=explanation,
             summary=summary,
             strengths=strengths,
             weaknesses=weaknesses,

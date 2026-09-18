@@ -244,6 +244,16 @@ def build_shell(page: ft.Page) -> ft.Control:
             )
             eval_controls.append(badge)
 
+            if getattr(evaluation, "explanation", ""):
+                eval_controls.append(
+                    ft.Text(
+                        f"Uzasadnienie: {evaluation.explanation}",
+                        italic=True,
+                        size=13,
+                        color=ft.Colors.GREY_400,
+                    )
+                )
+
             if evaluation.summary:
                 eval_controls.append(
                     ft.Text(
@@ -414,6 +424,7 @@ def build_shell(page: ft.Page) -> ft.Control:
                             offer_id=eval_rec.offer_id,
                             fit_score=eval_rec.fit_score,
                             verdict=eval_rec.verdict,
+                            explanation=getattr(eval_rec, "explanation", ""),
                             summary=eval_rec.summary,
                             strengths=eval_rec.strengths,
                             weaknesses=eval_rec.weaknesses,

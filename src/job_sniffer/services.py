@@ -167,7 +167,7 @@ class EvaluationService:
         evaluation = JobOfferEvaluation(
             offer_id=offer_id,
             fit_score=result.fit_score,
-            verdict=result.verdict,
+            verdict=result.verdict, explanation=result.explanation,
             summary=result.summary,
             strengths=result.strengths,
             weaknesses=result.weaknesses,
