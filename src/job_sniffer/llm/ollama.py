@@ -59,7 +59,7 @@ class OllamaProvider(LLMProvider):
                 {"role": "user", "content": user_prompt},
             ],
             format="json",
-            options={"temperature": 0.2},
+            options={"temperature": 0.0},
         )
 
         raw_content = response.message.content or "{}"

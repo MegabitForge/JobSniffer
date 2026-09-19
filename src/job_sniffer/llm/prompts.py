@@ -6,23 +6,24 @@ import json
 import re
 from typing import Any
 
-EVALUATION_SYSTEM_PROMPT = """Jesteś ekspertem rekrutacji IT. Porównujesz ofertę pracy z CV kandydata.
+EVALUATION_SYSTEM_PROMPT = """Jesteś analitycznym algorytmem rekrutacyjnym. Oceniasz matematycznie dopasowanie kandydata (MOJE CV) do wymogów (OFERTA PRACY). Wynik to ścisła kalkulacja.
 
-Zasady:
-1. OFERTA to wymagania pracodawcy. MOJE CV to profil kandydata. Nie myl ich ról.
-2. Zwróć uwagę na faktyczne, twarde wymagania techniczne z oferty (must-have vs nice-to-have, stack, seniority) ale nie ignoruj wymagań miękkich.
-3. fit_score (0-100): realna szansa na zaproszenie na rozmowę rekrutacyjną (bądź bardzo rygorystyczny) i zwracaj uwagę na tytuł stanowiska i jego wymagania i używaj pełnej skali (10% kąpletnie się nie nadaje, 20% ma jedną z kluczowych umiejętności, 30% ma pare kluczowych, 50% większość kluczowych, 60% ma wszystkie umiejętności kluczowe, 70% ma też większość z mile widzianych, 90% ma wszystko idealny kandydat, 100% ma rodzinę w tej firmie (z czego solidniejsze umiejętności albo umiejętności mile widziane dają więcej punktów, a mile widziane dodają je)).
-4. strengths: technologie i doświadczenia z CV pokrywające wymagania oferty.
-5. weaknesses: kluczowe wymagania z oferty, których brak w CV kandydata lub też braki w wymaganiach miękkich.
+ALGORYTM PUNKTACJI (Max 100 pkt):
+1. Podziel wymagania z oferty na 3 grupy: TWARDE KLUCZOWE (must-have), TECHNICZNE DODATKOWE (nice-to-have) oraz MIĘKKIE.
+2. MUST-HAVE (Pula: 50 pkt). Podziel 50 przez ilość kluczowych wymagań. Za każde zbadaj CV. Jeśli stanowisko wyższego szczebla narzuca posiadanie dużego doświadczenia, rygorystycznie obniżaj ilość przyznanych punktów w przypadku zbyt małego udokumentowanego stażu u kandydata dla tej technologii.
+3. NICE-TO-HAVE (Pula: 30 pkt). Podziel 30 przez ilość wymagań dodatkowych. Oblicz i przydziel adekwatnie za każdy dowód umiejętności.
+4. MIĘKKIE (Pula: 20 pkt). Podziel 20 przez ilość wymagań miękkich (języki komunikacyjne, organizacja). Oblicz i przydziel punkty za każde spełnione.
+*(Uwaga: w razie braku wymagań w grupie dodatkowej lub miękkiej, przenieś ich całą pulę punktową wprost na poczet wagi MUST-HAVE).*
+5. W przypadku rażącego braku fundamentalnej technologii rdzennej dla profilu stanowiska - odejmij od końcowej sumy karę 30 pkt.
 
-Zwróć wyłącznie JSON:
+Zwróć WYŁĄCZNIE obiekt JSON po wyliczeniu:
 {
-  "summary": "Zwięzłe podsumowanie profilu oferty i kluczowych technologii (parę słów)",
-  "strengths": ["mocna strona z CV pokrywająca ofertę"],
-  "weaknesses": ["brak kandydata względem wymagań oferty"],
-  "verdict": "Krótki opis werdyktu dopasowania (parę słów)",
-  "explanation": "Szczegółowy wyjaśnienie oceny (parę zdań)",
-  "fit_score": 0
+  "summary": "Jedno zdanie o głównym celu stanowiska",
+  "strengths": ["spełnione wymaganie + urywek udowadniający z CV"],
+  "weaknesses": ["nazwy braków lub nazwy umiejętności gdzie drastycznie zabrakło wymaganego stażu"],
+  "verdict": "Krótkie podsumowanie zysku punktowego",
+  "explanation": "Brudnopis matematyczny: wypisz zdobyte kwoty per wymóg z każdej użytej puli, dodaj kary i zsumuj.",
+  "fit_score": <typ int, suma obliczeń z 0 do 100>
 }"""
 
 
@@ -36,10 +37,6 @@ def build_evaluation_user_prompt(
     desc = (job_description or "").strip()
     if not desc:
         desc = "Brak szczegółowego opisu (dokonaj szacunku na podstawie tytułu i firmy)."
-    else:
-        desc = desc[:4000]
-
-    cv_excerpt = cv_text.strip()[:5000]
 
     return f"""OFERTA PRACY:
 Stanowisko: {job_title}
@@ -48,7 +45,7 @@ Wymagania i opis:
 {desc}
 
 MOJE CV:
-{cv_excerpt}
+{cv_text}
 
 Zadanie:
 Oceń dopasowanie MOJEGO CV do faktycznych wymagań OFERTY PRACY. Zwróć JSON."""

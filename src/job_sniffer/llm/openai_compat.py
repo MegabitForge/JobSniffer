@@ -61,7 +61,7 @@ class OpenAICompatProvider(LLMProvider):
                 {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.2,
+            temperature=0.0,
             response_format={"type": "json_object"},
         )
 
