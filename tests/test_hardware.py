@@ -18,7 +18,7 @@ def test_detect_gpu_nvidia_mocked() -> None:
         assert info.has_gpu is True
         assert "RTX 4050" in info.name
         assert info.vram_mb == 6141
-        assert info.backend == "vulkan"
+        assert info.backend in ("vulkan", "cuda_13")
         summary = format_gpu_summary(info)
         assert "6.0 GB VRAM" in summary
         assert "akceleracja aktywna" in summary

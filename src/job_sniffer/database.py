@@ -58,7 +58,7 @@ class JobOfferEvaluationRecord(Base):
     )
     fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
     verdict: Mapped[str] = mapped_column(String, nullable=False)
-    explanation: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     strengths: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     weaknesses: Mapped[list[str]] = mapped_column(JSON, nullable=False)
@@ -110,13 +110,16 @@ def init_db(session: Session) -> None:
     Base.metadata.create_all(bind)
     from sqlalchemy import text
     from sqlalchemy.exc import OperationalError
+
     try:
-        session.execute(text("ALTER TABLE job_offer_evaluations ADD COLUMN explanation TEXT NOT NULL DEFAULT '';"))
+        session.execute(
+            text(
+                "ALTER TABLE job_offer_evaluations ADD COLUMN explanation TEXT NOT NULL DEFAULT '';"
+            )
+        )
         session.commit()
     except OperationalError:
         session.rollback()
-    
-
 
 
 def save_offer(session: Session, offer: JobOffer) -> int | None:
@@ -258,9 +261,7 @@ def list_offers_with_evaluations(
     return [(row[0], row[1]) for row in results]
 
 
-def list_unevaluated_offers(
-    session: Session, limit: int | None = None
-) -> list[JobOfferRecord]:
+def list_unevaluated_offers(session: Session, limit: int | None = None) -> list[JobOfferRecord]:
     """Retrieve job offers that do not yet have an AI evaluation."""
     statement = (
         select(JobOfferRecord)

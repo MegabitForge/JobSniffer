@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 class EvaluationService:
     """Coordinates CV parsing, model downloading, runner lifecycle, and evaluations."""
 
-    def __init__(self, config: AppConfig) -> None:
-        self.config = config
-        self.runner = LlamaServerProcess(port=config.llama_server_port)
+    def __init__(self, get_config: Callable[[], AppConfig]) -> None:
+        self._get_config = get_config
+        self.runner = LlamaServerProcess(port=get_config().llama_server_port)
         self._provider: LLMProvider | None = None
         self._cached_cv_text: str | None = None
 
     def get_cv_text(self, reload: bool = False) -> str | None:
         """Retrieve the parsed text of the configured CV."""
-        if not self.config.cv_path:
+        if not self._get_config().cv_path:
             return None
         if self._cached_cv_text is not None and not reload:
             return self._cached_cv_text
 
         try:
-            self._cached_cv_text = parse_cv_file(self.config.cv_path)
+            self._cached_cv_text = parse_cv_file(self._get_config().cv_path)
             return self._cached_cv_text
         except CVParseError as error:
             logger.warning("Failed to parse configured CV: %s", error)
@@ -48,11 +48,11 @@ class EvaluationService:
 
     def get_provider(self) -> LLMProvider:
         """Get or initialize the current LLM provider."""
-        model_opt = get_model_by_id(self.config.selected_model_id)
-        if self.config.engine == "ollama":
-            return OllamaProvider(host=self.config.ollama_url, model=model_opt.ollama_tag)
+        model_opt = get_model_by_id(self._get_config().selected_model_id)
+        if self._get_config().engine == "ollama":
+            return OllamaProvider(host=self._get_config().ollama_url, model=model_opt.ollama_tag)
 
-        base_url = f"http://127.0.0.1:{self.config.llama_server_port}/v1"
+        base_url = f"http://127.0.0.1:{self._get_config().llama_server_port}/v1"
         return OpenAICompatProvider(base_url=base_url, model=model_opt.name)
 
     async def is_ready(self) -> bool:
@@ -65,25 +65,25 @@ class EvaluationService:
         progress_callback: Callable[[float, str], None] | None = None,
     ) -> bool:
         """Ensure necessary binaries and models are downloaded and the service is started with GPU offloading."""
-        models_dir = Path(self.config.models_dir)
+        models_dir = Path(self._get_config().models_dir)
         models_dir.mkdir(parents=True, exist_ok=True)
-        model_opt = get_model_by_id(self.config.selected_model_id)
+        model_opt = get_model_by_id(self._get_config().selected_model_id)
 
-        if self.config.engine == "llama_cpp":
+        if self._get_config().engine == "llama_cpp":
             server_exe = await ensure_llama_server(
                 models_dir,
-                use_gpu=self.config.use_gpu,
+                use_gpu=self._get_config().use_gpu,
                 progress_callback=progress_callback,
             )
             model_path = await ensure_gguf_model(
                 model_opt, models_dir, progress_callback=progress_callback
             )
 
-            gpu_layers = self.config.gpu_layers if self.config.use_gpu else 0
+            gpu_layers = self._get_config().gpu_layers if self._get_config().use_gpu else 0
             
             from job_sniffer.llm.hardware import detect_gpu
             actual_backend = "cpu"
-            if self.config.use_gpu:
+            if self._get_config().use_gpu:
                 actual_backend = detect_gpu().backend
                 
             if gpu_layers > 0 and actual_backend != "cpu":
@@ -111,10 +111,10 @@ class EvaluationService:
                 progress_callback(1.0, success_msg)
             return True
 
-        if self.config.engine == "ollama":
+        if self._get_config().engine == "ollama":
             await pull_ollama_model(
                 model_opt,
-                host=self.config.ollama_url,
+                host=self._get_config().ollama_url,
                 progress_callback=progress_callback,
             )
             return True

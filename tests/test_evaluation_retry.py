@@ -24,7 +24,7 @@ async def test_evaluate_offer_retries_once_and_succeeds(tmp_path: Path) -> None:
     cv_file.write_text("Doświadczony programista Python, FastAPI, Docker.", encoding="utf-8")
 
     config = AppConfig(cv_path=str(cv_file))
-    service = EvaluationService(config)
+    service = EvaluationService(lambda: config)
 
     mock_provider = MagicMock()
     # First attempt raises Exception, second attempt succeeds
@@ -73,7 +73,7 @@ async def test_evaluate_offer_fails_after_retry(tmp_path: Path) -> None:
     cv_file.write_text("Doświadczony programista Python.", encoding="utf-8")
 
     config = AppConfig(cv_path=str(cv_file))
-    service = EvaluationService(config)
+    service = EvaluationService(lambda: config)
 
     mock_provider = MagicMock()
     # Both attempts fail

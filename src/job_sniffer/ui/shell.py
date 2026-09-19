@@ -55,7 +55,7 @@ class ScanInterruptedError(RuntimeError):
 def build_shell(page: ft.Page) -> ft.Control:
     """Build the application UI shell with persistent offers, delete/re-evaluate buttons, and dynamic navigation."""
     config: AppConfig = load_config()
-    evaluation_service = EvaluationService(config)
+    evaluation_service = EvaluationService(load_config)
 
     file_picker = ft.FilePicker()
     page.services.append(file_picker)
