@@ -29,25 +29,39 @@ class LlamaServerProcess:
     async def wait_until_ready(self, timeout_seconds: float = 30.0) -> bool:
         """Poll the server health endpoint until it responds with 200 OK."""
         url = f"http://127.0.0.1:{self.port}/health"
-        loop = asyncio.get_running_loop()
-        start_time = loop.time()
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            while loop.time() - start_time < timeout_seconds:
-                if not self.is_running:
-                    logger.warning("llama-server process exited unexpectedly")
-                    return False
-                try:
-                    response = await client.get(url)
-                    if response.status_code == 200:
-                        logger.info("llama-server is healthy and ready on port %s", self.port)
-                        return True
-                except (httpx.HTTPError, OSError) as poll_err:
-                    logger.debug("Health check polling not ready yet: %s", poll_err)
-                await asyncio.sleep(0.5)
+        async def _poll_server() -> bool:
+            sleep_time = 0.1
 
-        logger.error("llama-server failed to become ready within %s seconds", timeout_seconds)
-        return False
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                while self.is_running:
+                    try:
+                        response = await client.get(url)
+
+                        if response.status_code == 200:
+                            logger.info("llama-server is healthy and ready on port %s", self.port)
+                            return True
+
+                        elif response.status_code >= 500:
+                            logger.error(
+                                "llama-server returned critical error: %s", response.status_code
+                            )
+                            return False
+
+                    except httpx.HTTPError, OSError:
+                        pass
+
+                    await asyncio.sleep(sleep_time)
+                    sleep_time = min(sleep_time * 1.5, 1.0)
+
+            logger.warning("llama-server process exited unexpectedly during health check")
+            return False
+
+        try:
+            return await asyncio.wait_for(_poll_server(), timeout=timeout_seconds)
+        except TimeoutError:
+            logger.error("llama-server failed to become ready within %s seconds", timeout_seconds)
+            return False
 
     async def start(
         self,
