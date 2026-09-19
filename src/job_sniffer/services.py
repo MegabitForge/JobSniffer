@@ -80,11 +80,19 @@ class EvaluationService:
             )
 
             gpu_layers = self.config.gpu_layers if self.config.use_gpu else 0
-            start_msg = (
-                "Uruchamianie lokalnego silnika llama-server na karcie graficznej (GPU)..."
-                if gpu_layers > 0
-                else "Uruchamianie lokalnego silnika llama-server na procesorze (CPU)..."
-            )
+            
+            from job_sniffer.llm.hardware import detect_gpu
+            actual_backend = "cpu"
+            if self.config.use_gpu:
+                actual_backend = detect_gpu().backend
+                
+            if gpu_layers > 0 and actual_backend != "cpu":
+                start_msg = f"Uruchamianie lokalnego silnika llama-server na karcie graficznej [{actual_backend.upper()}]..."
+                success_msg = f"Silnik llama-server gotowy do pracy (akceleracja GPU [{actual_backend.upper()}] aktywna)."
+            else:
+                start_msg = "Uruchamianie lokalnego silnika llama-server na procesorze (CPU)..."
+                success_msg = "Silnik llama-server gotowy do pracy (tryb CPU)."
+
             if progress_callback:
                 progress_callback(0.95, start_msg)
 
@@ -100,12 +108,7 @@ class EvaluationService:
                 return False
 
             if progress_callback:
-                progress_callback(
-                    1.0,
-                    "Silnik llama-server gotowy do pracy (akceleracja GPU aktywna)."
-                    if gpu_layers > 0
-                    else "Silnik llama-server gotowy do pracy (tryb CPU).",
-                )
+                progress_callback(1.0, success_msg)
             return True
 
         if self.config.engine == "ollama":

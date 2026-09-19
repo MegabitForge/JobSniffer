@@ -11,7 +11,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-BackendType = Literal["vulkan", "cuda", "cpu"]
+BackendType = Literal["vulkan", "cuda_12", "cuda_13", "cpu"]
 
 
 @dataclass(frozen=True)
@@ -45,11 +45,45 @@ def detect_gpu() -> GPUInfo:
                 parts = [p.strip() for p in first_line.split(",")]
                 gpu_name = parts[0]
                 vram_mb = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                                # Check which CUDA runtime is actually installed
+                import os, glob
+                cuda_path = os.environ.get("CUDA_PATH", "")
+                has_13 = False
+                has_12 = False
+
+                if cuda_path and os.path.exists(cuda_path):
+                    has_13 = bool(glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_13*.dll"), recursive=True))
+                    has_12 = bool(glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_12*.dll"), recursive=True))
+
+                if not has_13 and not has_12:
+                    for dll in ["cudart64_13.dll"]:
+                        try:
+                            ctypes.WinDLL(dll)
+                            has_13 = True
+                            break
+                        except OSError:
+                            pass
+                    if not has_13:
+                        for dll in ["cudart64_12.dll", "cudart64_11.dll"]:
+                            try:
+                                ctypes.WinDLL(dll)
+                                has_12 = True
+                                break
+                            except OSError:
+                                pass
+                
+                backend_type = "vulkan"
+                if has_13:
+                    backend_type = "cuda_13"
+                elif has_12:
+                    backend_type = "cuda_12"
+
+                
                 return GPUInfo(
                     has_gpu=True,
                     name=gpu_name,
                     vram_mb=vram_mb,
-                    backend="vulkan",
+                    backend=backend_type,
                 )
         except (subprocess.SubprocessError, OSError, ValueError) as err:
             logger.debug("nvidia-smi query failed: %s", err)
