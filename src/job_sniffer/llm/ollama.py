@@ -29,17 +29,11 @@ class OllamaProvider(LLMProvider):
     async def is_ready(self) -> bool:
         """Verify Ollama daemon is reachable and the model exists."""
         try:
-            models_response = await self._client.list()
-            for m in models_response.models:
-                m_name = getattr(m, "model", "") or getattr(m, "name", "")
-                if self.model in m_name or m_name in self.model:
-                    return True
+            await self._client.show(self.model)
             return True
         except ollama.ResponseError:
             return False
-        except httpx.HTTPError:
-            return False
-        except OSError:
+        except (httpx.HTTPError, OSError):
             return False
 
     async def evaluate_match(
