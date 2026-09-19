@@ -22,7 +22,7 @@ def default_models_directory() -> str:
 
 def config_file_path() -> Path:
     """Return persistent config JSON file path."""
-    config_dir = Path(platformdirs.user_config_dir("job-sniffer"))
+    config_dir = Path(platformdirs.user_config_dir("job-sniffer", appauthor=False))
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "config.json"
 
