@@ -1,7 +1,5 @@
 """Application service boundary."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from collections.abc import Callable
@@ -80,12 +78,13 @@ class EvaluationService:
             )
 
             gpu_layers = self._get_config().gpu_layers if self._get_config().use_gpu else 0
-            
+
             from job_sniffer.llm.hardware import detect_gpu
+
             actual_backend = "cpu"
             if self._get_config().use_gpu:
                 actual_backend = detect_gpu().backend
-                
+
             if gpu_layers > 0 and actual_backend != "cpu":
                 start_msg = f"Uruchamianie lokalnego silnika llama-server na karcie graficznej [{actual_backend.upper()}]..."
                 success_msg = f"Silnik llama-server gotowy do pracy (akceleracja GPU [{actual_backend.upper()}] aktywna)."
@@ -170,7 +169,8 @@ class EvaluationService:
         evaluation = JobOfferEvaluation(
             offer_id=offer_id,
             fit_score=result.fit_score,
-            verdict=result.verdict, explanation=result.explanation,
+            verdict=result.verdict,
+            explanation=result.explanation,
             summary=result.summary,
             strengths=result.strengths,
             weaknesses=result.weaknesses,

@@ -1,7 +1,5 @@
 """Catalog of supported predefined LLM models."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 

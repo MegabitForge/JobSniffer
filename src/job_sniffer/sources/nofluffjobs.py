@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import html
 import json
 import logging
@@ -96,6 +94,12 @@ class NoFluffJobsSource:
             for offer in page_new:
                 seen_keys.add(offer_listing_key(offer))
             offers.extend(page_new)
+            if search.limit is not None and len(offers) >= search.limit:
+                logger.info(
+                    "Reached requested limit of %s NoFluffJobs offers, stopping pagination",
+                    search.limit,
+                )
+                break
         else:
             logger.warning("Stopped NoFluffJobs pagination after max_pages=%s", self.max_pages)
 

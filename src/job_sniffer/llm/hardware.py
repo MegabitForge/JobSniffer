@@ -1,7 +1,5 @@
 """Hardware and GPU acceleration detection."""
 
-from __future__ import annotations
-
 import ctypes
 import logging
 import shutil
@@ -45,15 +43,25 @@ def detect_gpu() -> GPUInfo:
                 parts = [p.strip() for p in first_line.split(",")]
                 gpu_name = parts[0]
                 vram_mb = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-                                # Check which CUDA runtime is actually installed
-                import os, glob
+                # Check which CUDA runtime is actually installed
+                import glob
+                import os
+
                 cuda_path = os.environ.get("CUDA_PATH", "")
                 has_13 = False
                 has_12 = False
 
                 if cuda_path and os.path.exists(cuda_path):
-                    has_13 = bool(glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_13*.dll"), recursive=True))
-                    has_12 = bool(glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_12*.dll"), recursive=True))
+                    has_13 = bool(
+                        glob.glob(
+                            os.path.join(cuda_path, "bin", "**", "cudart64_13*.dll"), recursive=True
+                        )
+                    )
+                    has_12 = bool(
+                        glob.glob(
+                            os.path.join(cuda_path, "bin", "**", "cudart64_12*.dll"), recursive=True
+                        )
+                    )
 
                 if not has_13 and not has_12:
                     for dll in ["cudart64_13.dll"]:
@@ -71,14 +79,13 @@ def detect_gpu() -> GPUInfo:
                                 break
                             except OSError:
                                 pass
-                
+
                 backend_type = "vulkan"
                 if has_13:
                     backend_type = "cuda_13"
                 elif has_12:
                     backend_type = "cuda_12"
 
-                
                 return GPUInfo(
                     has_gpu=True,
                     name=gpu_name,
@@ -93,7 +100,7 @@ def detect_gpu() -> GPUInfo:
     try:
         ctypes.CDLL("vulkan-1.dll")
         has_vulkan = True
-    except (OSError, AttributeError):
+    except OSError, AttributeError:
         has_vulkan = False
 
     if has_vulkan:

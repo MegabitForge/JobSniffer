@@ -1,7 +1,5 @@
 """OpenAI-compatible provider boundary (e.g. llama-server)."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import random
 import re
@@ -82,7 +80,7 @@ class TheProtocolJobSource:
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
             self._raise_if_stopped()
-            offers = self._collect_listing_pages(driver, url)
+            offers = self._collect_listing_pages(driver, url, limit=search.limit)
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
             limited_offers = limit_offers(new_offers, search.limit)
@@ -98,7 +96,9 @@ class TheProtocolJobSource:
             except WebDriverException:
                 logger.info("TheProtocol browser session was already closed")
 
-    def _collect_listing_pages(self, driver: uc.Chrome, url: str) -> list[JobOffer]:
+    def _collect_listing_pages(
+        self, driver: uc.Chrome, url: str, *, limit: int | None = None
+    ) -> list[JobOffer]:
         offers: list[JobOffer] = []
         seen_keys: set[tuple[str, str]] = set()
 
@@ -120,6 +120,12 @@ class TheProtocolJobSource:
             for offer in page_new:
                 seen_keys.add(offer_listing_key(offer))
             offers.extend(page_new)
+            if limit is not None and len(offers) >= limit:
+                logger.info(
+                    "Reached requested limit of %s TheProtocol offers, stopping pagination",
+                    limit,
+                )
+                break
         else:
             logger.warning("Stopped TheProtocol pagination after max_pages=%s", self.max_pages)
 

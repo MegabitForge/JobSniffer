@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from job_sniffer.database import (
@@ -41,7 +39,7 @@ def test_save_and_retrieve_evaluation(tmp_path: Path) -> None:
             offer_id=offer_id,
             fit_score=88,
             explanation="Test explanation",
-                    verdict="Wysoka szansa na rozmowę",
+            verdict="Wysoka szansa na rozmowę",
             summary="Stanowisko skupione na backendzie i mikroserwisach.",
             strengths=["5+ lat w Pythonie", "Architektura mikroserwisów"],
             weaknesses=["Brak znajomości GCP"],
@@ -107,7 +105,7 @@ def test_list_unevaluated_offers(tmp_path: Path) -> None:
                 offer_id=id1,
                 fit_score=75,
                 explanation="Test explanation",
-                    verdict="Dobra szansa",
+                verdict="Dobra szansa",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],
@@ -146,7 +144,7 @@ def test_delete_offer_and_cascade_evaluation(tmp_path: Path) -> None:
                 offer_id=oid,
                 fit_score=80,
                 explanation="Test explanation",
-                    verdict="OK",
+                verdict="OK",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],
@@ -190,7 +188,7 @@ def test_delete_evaluation_only(tmp_path: Path) -> None:
                 offer_id=oid,
                 fit_score=50,
                 explanation="Test explanation",
-                    verdict="Średnia",
+                verdict="Średnia",
                 summary="Sum",
                 strengths=[],
                 weaknesses=[],
