@@ -1,1 +1,193 @@
 """Application service boundary."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
+from sqlalchemy.orm import Session
+
+from job_sniffer.config import AppConfig
+from job_sniffer.cv_parser import CVParseError, parse_cv_file
+from job_sniffer.database import JobOfferRecord, save_evaluation
+from job_sniffer.llm.base import LLMProvider
+from job_sniffer.llm.catalog import get_model_by_id
+from job_sniffer.llm.downloader import ensure_gguf_model, ensure_llama_server, pull_ollama_model
+from job_sniffer.llm.ollama import OllamaProvider
+from job_sniffer.llm.openai_compat import OpenAICompatProvider
+from job_sniffer.llm.runner import LlamaServerProcess
+from job_sniffer.models import JobOffer, JobOfferEvaluation
+
+logger = logging.getLogger(__name__)
+
+
+class EvaluationService:
+    """Coordinates CV parsing, model downloading, runner lifecycle, and evaluations."""
+
+    def __init__(self, get_config: Callable[[], AppConfig]) -> None:
+        self._get_config = get_config
+        self.runner = LlamaServerProcess(port=get_config().llama_server_port)
+        self._provider: LLMProvider | None = None
+        self._cached_cv_text: str | None = None
+
+    def get_cv_text(self, reload: bool = False) -> str | None:
+        """Retrieve the parsed text of the configured CV."""
+        if not self._get_config().cv_path:
+            return None
+        if self._cached_cv_text is not None and not reload:
+            return self._cached_cv_text
+
+        try:
+            self._cached_cv_text = parse_cv_file(self._get_config().cv_path)
+            return self._cached_cv_text
+        except CVParseError as error:
+            logger.warning("Failed to parse configured CV: %s", error)
+            return None
+
+    def get_provider(self) -> LLMProvider:
+        """Get or initialize the current LLM provider."""
+        model_opt = get_model_by_id(self._get_config().selected_model_id)
+        if self._get_config().engine == "ollama":
+            return OllamaProvider(host=self._get_config().ollama_url, model=model_opt.ollama_tag)
+
+        base_url = f"http://127.0.0.1:{self._get_config().llama_server_port}/v1"
+        return OpenAICompatProvider(base_url=base_url, model=model_opt.name)
+
+    async def is_ready(self) -> bool:
+        """Check if LLM backend is ready for evaluation requests."""
+        provider = self.get_provider()
+        return await provider.is_ready()
+
+    async def prepare_backend(
+        self,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> bool:
+        """Ensure necessary binaries and models are downloaded and the service is started with GPU offloading."""
+        models_dir = Path(self._get_config().models_dir)
+        models_dir.mkdir(parents=True, exist_ok=True)
+        model_opt = get_model_by_id(self._get_config().selected_model_id)
+
+        if self._get_config().engine == "llama_cpp":
+            server_exe = await ensure_llama_server(
+                models_dir,
+                use_gpu=self._get_config().use_gpu,
+                progress_callback=progress_callback,
+            )
+            model_path = await ensure_gguf_model(
+                model_opt, models_dir, progress_callback=progress_callback
+            )
+
+            gpu_layers = self._get_config().gpu_layers if self._get_config().use_gpu else 0
+            
+            from job_sniffer.llm.hardware import detect_gpu
+            actual_backend = "cpu"
+            if self._get_config().use_gpu:
+                actual_backend = detect_gpu().backend
+                
+            if gpu_layers > 0 and actual_backend != "cpu":
+                start_msg = f"Uruchamianie lokalnego silnika llama-server na karcie graficznej [{actual_backend.upper()}]..."
+                success_msg = f"Silnik llama-server gotowy do pracy (akceleracja GPU [{actual_backend.upper()}] aktywna)."
+            else:
+                start_msg = "Uruchamianie lokalnego silnika llama-server na procesorze (CPU)..."
+                success_msg = "Silnik llama-server gotowy do pracy (tryb CPU)."
+
+            if progress_callback:
+                progress_callback(0.95, start_msg)
+
+            started = await self.runner.start(
+                server_exe=server_exe,
+                model_path=model_path,
+                gpu_layers=gpu_layers,
+            )
+            if not started:
+                logger.error("Failed to start llama-server")
+                if progress_callback:
+                    progress_callback(1.0, "Nie udało się uruchomić llama-server.")
+                return False
+
+            if progress_callback:
+                progress_callback(1.0, success_msg)
+            return True
+
+        if self._get_config().engine == "ollama":
+            await pull_ollama_model(
+                model_opt,
+                host=self._get_config().ollama_url,
+                progress_callback=progress_callback,
+            )
+            return True
+
+        return False
+
+    async def evaluate_offer(
+        self,
+        offer: JobOffer | JobOfferRecord,
+        offer_id: int | None,
+        session: Session,
+    ) -> JobOfferEvaluation | None:
+        """Evaluate a single job offer against the candidate's CV and persist the result with 1 retry."""
+        cv_text = self.get_cv_text()
+        if not cv_text:
+            logger.info("Skipping evaluation: No CV configured or CV could not be read.")
+            return None
+
+        provider = self.get_provider()
+        result = None
+        for attempt in (1, 2):
+            try:
+                result = await provider.evaluate_match(
+                    cv_text=cv_text,
+                    job_title=offer.title,
+                    job_description=offer.description_text,
+                    job_company=offer.company,
+                )
+                break
+            except Exception as exc:
+                if attempt == 1:
+                    logger.warning(
+                        "LLM evaluation attempt 1 failed for '%s' - '%s' (%s). Retrying once...",
+                        offer.title,
+                        offer.company,
+                        exc,
+                    )
+                    try:
+                        await asyncio.sleep(1.0)
+                    except RuntimeError:
+                        pass
+                else:
+                    logger.exception(
+                        "LLM evaluation failed after retry for '%s' - '%s'",
+                        offer.title,
+                        offer.company,
+                    )
+                    return None
+
+        if result is None:
+            return None
+
+        evaluation = JobOfferEvaluation(
+            offer_id=offer_id,
+            fit_score=result.fit_score,
+            verdict=result.verdict, explanation=result.explanation,
+            summary=result.summary,
+            strengths=result.strengths,
+            weaknesses=result.weaknesses,
+            raw_response=result.raw_response,
+        )
+
+        if offer_id is not None:
+            save_evaluation(session, evaluation)
+            logger.info(
+                "Saved match evaluation for offer %s: score=%s%%, verdict='%s'",
+                offer_id,
+                evaluation.fit_score,
+                evaluation.verdict,
+            )
+
+        return evaluation
+
+    def shutdown(self) -> None:
+        """Clean up background processes."""
+        self.runner.stop()
