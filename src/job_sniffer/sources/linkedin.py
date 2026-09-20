@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from pathlib import Path

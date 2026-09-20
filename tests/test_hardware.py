@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from unittest.mock import MagicMock, patch
 
 from job_sniffer.llm.hardware import GPUInfo, detect_gpu, format_gpu_summary

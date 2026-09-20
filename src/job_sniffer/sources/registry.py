@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -27,7 +25,7 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
         key="olx",
         name="OLX",
         status="active",
-        description="Unstable",
+        description="",
     ),
     SourceDefinition(
         key="theprotocol",

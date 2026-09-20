@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from job_sniffer.llm.catalog import AVAILABLE_MODELS, get_model_by_id
 
 

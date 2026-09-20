@@ -1,7 +1,5 @@
 """SQLAlchemy persistence for job offers and their AI evaluations."""
 
-from __future__ import annotations
-
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime

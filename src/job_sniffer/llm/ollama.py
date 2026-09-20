@@ -1,7 +1,5 @@
 """Ollama provider boundary."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
@@ -33,7 +31,7 @@ class OllamaProvider(LLMProvider):
             return True
         except ollama.ResponseError:
             return False
-        except (httpx.HTTPError, OSError):
+        except httpx.HTTPError, OSError:
             return False
 
     async def evaluate_match(

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -34,7 +32,7 @@ async def test_evaluate_offer_retries_once_and_succeeds(tmp_path: Path) -> None:
             MatchEvaluationResult(
                 fit_score=92,
                 explanation="Test explanation",
-                    verdict="Świetne dopasowanie",
+                verdict="Świetne dopasowanie",
                 summary="Bardzo dobry profil",
                 strengths=["Python", "FastAPI"],
                 weaknesses=[],

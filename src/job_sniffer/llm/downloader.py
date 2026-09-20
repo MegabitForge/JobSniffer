@@ -1,7 +1,5 @@
 """Downloader for local LLM models and server runtime."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import zipfile
@@ -15,18 +13,10 @@ from job_sniffer.llm.catalog import ModelOption
 
 logger = logging.getLogger(__name__)
 
-LLAMA_SERVER_VULKAN_ZIP_URL = (
-    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-vulkan-x64.zip"
-)
-LLAMA_SERVER_CUDA_12_ZIP_URL = (
-    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cuda-12.4-x64.zip"
-)
-LLAMA_SERVER_CUDA_13_ZIP_URL = (
-    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cuda-13.3-x64.zip"
-)
-LLAMA_SERVER_CPU_ZIP_URL = (
-    "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cpu-x64.zip"
-)
+LLAMA_SERVER_VULKAN_ZIP_URL = "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-vulkan-x64.zip"
+LLAMA_SERVER_CUDA_12_ZIP_URL = "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cuda-12.4-x64.zip"
+LLAMA_SERVER_CUDA_13_ZIP_URL = "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cuda-13.3-x64.zip"
+LLAMA_SERVER_CPU_ZIP_URL = "https://github.com/ggerganov/llama.cpp/releases/download/b10946/llama-b10946-bin-win-cpu-x64.zip"
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -79,29 +69,32 @@ async def ensure_llama_server(
 ) -> Path:
     """Ensure llama-server.exe is downloaded and extracted, with GPU support if enabled."""
     from job_sniffer.llm.hardware import detect_gpu
-    
+
     bin_dir = models_dir / "bin"
     server_exe = bin_dir / "llama-server.exe"
 
     backend = "cpu"
     if use_gpu:
         backend = detect_gpu().backend
-        
+
     marker = bin_dir / f".backend_{backend}"
 
     # Check if existing installation matches requested GPU mode
     if server_exe.is_file() and marker.is_file():
-        logger.info("llama-server.exe already present and configured (gpu=%s, backend=%s)", use_gpu, backend)
+        logger.info(
+            "llama-server.exe already present and configured (gpu=%s, backend=%s)", use_gpu, backend
+        )
         return server_exe
 
     # Clean previous if backend changed
     if server_exe.is_file():
         import shutil
+
         shutil.rmtree(bin_dir, ignore_errors=True)
 
     bin_dir.mkdir(parents=True, exist_ok=True)
     zip_path = bin_dir / "llama-server.zip"
-    
+
     if backend == "cuda_13":
         download_url = LLAMA_SERVER_CUDA_13_ZIP_URL
         msg = "Pobieranie silnika AI z akceleracja GPU (CUDA 13.x)..."

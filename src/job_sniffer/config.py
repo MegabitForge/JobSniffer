@@ -1,7 +1,5 @@
 """Application configuration boundary."""
 
-from __future__ import annotations
-
 import json
 import logging
 from pathlib import Path
@@ -17,7 +15,7 @@ EngineType = Literal["llama_cpp", "ollama"]
 
 def default_models_directory() -> str:
     """Return default models storage directory in user app data."""
-    return str(Path(platformdirs.user_data_dir('job-sniffer',appauthor=False)) / "models")
+    return str(Path(platformdirs.user_data_dir("job-sniffer", appauthor=False)) / "models")
 
 
 def config_file_path() -> Path:

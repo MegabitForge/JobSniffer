@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import logging
 import random
@@ -67,7 +65,7 @@ class BulldogjobSource:
         )
         url = build_search_url(search)
         logger.info("Built Bulldogjob search URL: %s", url)
-        offers = self._collect_listing_pages(url)
+        offers = self._collect_listing_pages(url, limit=search.limit)
         new_offers = filter_new_offers(offers, self.duplicate_checker)
         logger.info("Parsed %s Bulldogjob offers, %s were new", len(offers), len(new_offers))
         limited_offers = limit_offers(new_offers, search.limit)
@@ -77,7 +75,7 @@ class BulldogjobSource:
             self.enriched_offer_handler,
         )
 
-    def _collect_listing_pages(self, url: str) -> list[JobOffer]:
+    def _collect_listing_pages(self, url: str, *, limit: int | None = None) -> list[JobOffer]:
         offers: list[JobOffer] = []
         seen_keys: set[tuple[str, str]] = set()
 
@@ -105,6 +103,12 @@ class BulldogjobSource:
             for offer in page_new:
                 seen_keys.add(offer_listing_key(offer))
             offers.extend(page_new)
+            if limit is not None and len(offers) >= limit:
+                logger.info(
+                    "Reached requested limit of %s Bulldogjob offers, stopping pagination",
+                    limit,
+                )
+                break
         else:
             logger.warning("Stopped Bulldogjob pagination after max_pages=%s", self.max_pages)
 
