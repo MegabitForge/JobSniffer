@@ -12,6 +12,7 @@ class SourceDefinition:
     name: str
     status: SourceStatus
     description: str
+    icon: str = ""
 
 
 SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
@@ -20,35 +21,41 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
         name="Pracuj.pl",
         status="active",
         description="",
+        icon="pracuj.png",
     ),
     SourceDefinition(
         key="olx",
         name="OLX",
         status="active",
         description="",
+        icon="olx.png",
     ),
     SourceDefinition(
         key="theprotocol",
         name="the:protocol",
         status="active",
         description="",
+        icon="theprotocol.png",
     ),
     SourceDefinition(
         key="nofluffjobs",
         name="No Fluff Jobs",
         status="active",
         description="",
+        icon="nofluffjobs.png",
     ),
     SourceDefinition(
         key="bulldogjob",
         name="Bulldogjob",
         status="active",
         description="",
+        icon="bulldogjob.png",
     ),
     SourceDefinition(
         key="linkedin",
         name="LinkedIn",
         status="disabled",
         description="Paused because of aggressive blocking.",
+        icon="linkedin.png",
     ),
 )

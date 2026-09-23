@@ -3,6 +3,20 @@ revision = 3
 requires-python = "==3.14.*"
 
 [[package]]
+name = "alembic"
+version = "1.20.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mako" },
+    { name = "sqlalchemy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/aa/02910bdb8e2f1444f6654d5b296cd827d126f82209050ee7b1000f92ac4b/alembic-1.20.0.tar.gz", hash = "sha256:db505480647bc60386c5369402f4a57a506b7539c9e9ef5e270d45cbbe4939bf", size = 2093272, upload-time = "2026-09-11T19:09:11.126Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/27/78a89b55b0904d222183164e079b4ca56208e94eff1d35ad1f1ad5be9b06/alembic-1.20.0-py3-none-any.whl", hash = "sha256:77eb101048d95f982c0353e9233404889dcd7a6fc244c107836c0e2fc9cf7d9d", size = 268719, upload-time = "2026-09-11T19:09:12.88Z" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -565,6 +579,7 @@ name = "job-sniffer"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "alembic" },
     { name = "flet" },
     { name = "httpx" },
     { name = "keyring" },
@@ -593,6 +608,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.14" },
     { name = "flet" },
     { name = "httpx" },
     { name = "keyring" },
@@ -685,6 +701,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f8/f4/2e784ee437f142ebb238ec0781a1ed80904ff42b430dced8bccfcbd6bc2e/linkedin_jobs_scraper-7.0.10.tar.gz", hash = "sha256:df6092efa047d863f8d7bd2dfc5a79fbc6351fd230a706ab544e48407f59fecd", size = 2795852, upload-time = "2026-08-22T22:35:34.461Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/ee/8f4e464e60660651c8d2e46be4942af7c1d2074f98f294d106fd3b3caa00/linkedin_jobs_scraper-7.0.10-py3-none-any.whl", hash = "sha256:f959ace1633fdbc8b4095ce449890b524e6f48c9233845b6e6c3afb047f93959", size = 78928, upload-time = "2026-08-22T22:35:32.865Z" },
+]
+
+[[package]]
+name = "mako"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/09/e07c4b5579a79f4b16f8d4f29f6c54514ac787c4ad506b8c4f28a0e6b0bf/mako-1.4.3.tar.gz", hash = "sha256:cd6537fe88d5fec315c55c2f8529bc4ce7a9a352ad7db3eeaa6a66e2dd4ec37a", size = 412799, upload-time = "2026-09-22T20:54:31.509Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/a0/053d6af3e8f871e0073b4a36732d9e65be77a72e5434c31b94f6af78a6bb/mako-1.4.3-py3-none-any.whl", hash = "sha256:723296007c870bfd6b3f0c3230dba7198096e5269297ebf5e4eff9e7ffa39d4f", size = 80164, upload-time = "2026-09-22T20:54:33.128Z" },
 ]
 
 [[package]]

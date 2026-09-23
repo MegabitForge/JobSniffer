@@ -3,7 +3,6 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import flet as ft
@@ -11,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from job_sniffer.config import AppConfig
 from job_sniffer.database import (
+    DB_PATH,
     connect,
     delete_evaluation,
     delete_offer,
@@ -26,7 +26,6 @@ from job_sniffer.ui.status_bar import StatusBar
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("job_sniffer.sqlite")
 PAGE_SIZE = 50
 
 

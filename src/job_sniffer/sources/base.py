@@ -3,13 +3,26 @@
 import random
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from threading import Event
-from typing import Protocol
+from typing import Literal, Protocol
 
 from job_sniffer.models import JobOffer, JobSearch
 
 DuplicateChecker = Callable[[JobOffer], bool]
 EnrichedOfferHandler = Callable[[JobOffer], bool]
+
+
+@dataclass(frozen=True)
+class ScanProgress:
+    """Progress report emitted by a source during a scan."""
+
+    stage: Literal["listing", "enrich"]
+    current: int
+    total: int | None
+
+
+ProgressHandler = Callable[[ScanProgress], None]
 
 
 def dedupe_listing_offers(offers: Iterable[JobOffer]) -> list[JobOffer]:

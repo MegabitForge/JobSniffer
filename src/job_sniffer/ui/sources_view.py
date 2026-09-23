@@ -1,6 +1,7 @@
 import flet as ft
 
 from job_sniffer.sources.registry import SOURCE_DEFINITIONS
+from job_sniffer.ui.source_icons import source_icon_image
 
 
 class SourcesView:
@@ -19,7 +20,8 @@ class SourcesView:
                         content=ft.Container(
                             content=ft.Row(
                                 [
-                                    ft.Icon(
+                                    source_icon_image(source_def.key, size=24)
+                                    or ft.Icon(
                                         ft.Icons.CHECK_CIRCLE
                                         if source_def.status == "active"
                                         else ft.Icons.HOURGLASS_EMPTY,
@@ -30,6 +32,15 @@ class SourcesView:
                                     ft.Text(
                                         f"{source_def.name} [{source_def.status.upper()}]",
                                         weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Container(expand=True),
+                                    ft.Icon(
+                                        ft.Icons.CHECK_CIRCLE
+                                        if source_def.status == "active"
+                                        else ft.Icons.HOURGLASS_EMPTY,
+                                        color=ft.Colors.GREEN
+                                        if source_def.status == "active"
+                                        else ft.Colors.GREY,
                                     ),
                                 ],
                                 spacing=10,

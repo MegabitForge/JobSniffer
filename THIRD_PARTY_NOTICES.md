@@ -6,6 +6,7 @@ metadata reported by the installed packages.
 
 | Package | Reported license |
 | --- | --- |
+| `alembic` | MIT |
 | `flet` | Apache-2.0 |
 | `httpx` | BSD-3-Clause |
 | `keyring` | MIT |

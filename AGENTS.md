@@ -28,6 +28,7 @@ uv run flet build windows    # desktop build -> build/windows (needs Windows + D
 ## Conventions
 
 - Python 3.14 only (`>=3.14,<3.15`).
+- All code and comments must be in English (variable/function names, docstrings, inline comments, type annotations).
 - UI strings, LLM prompts, and test assertions are in Polish — keep new user-facing/prompt/test text Polish.
 - Strict typing expected (mypy `strict = true`, `py.typed`).
 - Conventional commit style (`feat:`, `fix:`); default branch `master`.
