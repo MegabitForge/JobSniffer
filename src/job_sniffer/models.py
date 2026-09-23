@@ -1,5 +1,6 @@
 """Domain models."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -12,6 +13,7 @@ class JobSearch:
     keywords: str
     location: str
     limit: int | None = None
+    source_filters: Mapping[str, str | list[str]] | None = None
 
 
 @dataclass(frozen=True)

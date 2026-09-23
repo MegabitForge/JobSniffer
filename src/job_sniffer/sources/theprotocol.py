@@ -3,7 +3,7 @@ import random
 import re
 import threading
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
@@ -23,6 +23,8 @@ from job_sniffer.sources._text import (
 from job_sniffer.sources.base import (
     DuplicateChecker,
     EnrichedOfferHandler,
+    ProgressHandler,
+    ScanProgress,
     dedupe_listing_offers,
     filter_new_offers,
     limit_offers,
@@ -54,6 +56,7 @@ class TheProtocolJobSource:
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
         enriched_offer_handler: EnrichedOfferHandler | None = None,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
@@ -63,6 +66,7 @@ class TheProtocolJobSource:
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
         self.enriched_offer_handler = enriched_offer_handler
+        self.progress_handler = progress_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -84,9 +88,22 @@ class TheProtocolJobSource:
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
             limited_offers = limit_offers(new_offers, search.limit)
+
+            enrich_total = len(limited_offers)
+            enrich_processed = 0
+
+            def enrich_with_progress(offer: JobOffer) -> JobOffer | None:
+                nonlocal enrich_processed
+                enriched_offer = self._enrich_offer_from_detail(driver, offer)
+                enrich_processed += 1
+                self._emit_progress(
+                    ScanProgress(stage="enrich", current=enrich_processed, total=enrich_total)
+                )
+                return enriched_offer
+
             return process_enriched_offers(
                 limited_offers,
-                lambda offer: self._enrich_offer_from_detail(driver, offer),
+                enrich_with_progress,
                 self.enriched_offer_handler,
             )
         finally:
@@ -108,6 +125,7 @@ class TheProtocolJobSource:
             page_url = _with_page(url, page)
             html_text = self._fetch_html(driver, page_url)
             page_offers = parse_theprotocol_offers(html_text)
+            self._emit_progress(ScanProgress(stage="listing", current=page, total=None))
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s TheProtocol offers from listing page %s, %s were new in this scan",
@@ -191,9 +209,29 @@ class TheProtocolJobSource:
                 "TheProtocol scan cancelled because the application is closing."
             )
 
+    def _emit_progress(self, progress: ScanProgress) -> None:
+        if self.progress_handler is not None:
+            self.progress_handler(progress)
+
+
+_FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (
+    ("specializations", "sp", False),
+    ("technologies", "t", False),
+    ("levels", "p", False),
+    ("locations", "wp", True),
+    ("work_modes", "rw", False),
+    ("contract_types", "c", False),
+)
+
 
 def build_search_url(search: JobSearch) -> str:
     keyword = quote(search.keywords.strip())
+    segments = _build_filter_segments(search.source_filters)
+    if segments:
+        url = f"https://theprotocol.it/filtry/{'/'.join(segments)}"
+        if keyword:
+            url = f"{url}?kw={keyword}"
+        return url
     if is_poland_location(search.location):
         if not keyword:
             return "https://theprotocol.it/praca"
@@ -202,6 +240,33 @@ def build_search_url(search: JobSearch) -> str:
     if not keyword:
         return f"https://theprotocol.it/filtry/{location};wp"
     return f"https://theprotocol.it/filtry/{location};wp?kw={keyword}"
+
+
+def _build_filter_segments(
+    source_filters: Mapping[str, str | list[str]] | None,
+) -> list[str]:
+    if not source_filters:
+        return []
+    segments: list[str] = []
+    for key, code, slugify in _FILTER_SEGMENTS:
+        values = _filter_values(source_filters.get(key))
+        if not values:
+            continue
+        if slugify:
+            joined = ",".join(_slugify_location(value) for value in values)
+        else:
+            joined = ",".join(quote(value, safe="") for value in values)
+        segments.append(f"{joined};{code}")
+    return segments
+
+
+def _filter_values(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    return [item.strip() for item in value if item.strip()]
 
 
 def _with_page(url: str, page: int) -> str:

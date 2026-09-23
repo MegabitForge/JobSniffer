@@ -30,6 +30,7 @@ uv run flet build linux      # desktop build -> build/linux (needs Linux)
 
 - Python 3.14 only (`>=3.14,<3.15`).
 - Keep code cross-platform (Windows + Linux): guard OS-specific APIs (`ctypes.WinDLL`, `creationflags`, Windows paths) with `sys.platform` checks.
+- All code and comments must be in English (variable/function names, docstrings, inline comments, type annotations).
 - UI strings, LLM prompts, and test assertions are in Polish — keep new user-facing/prompt/test text Polish.
 - Strict typing expected (mypy `strict = true`, `py.typed`).
 - Conventional commit style (`feat:`, `fix:`); default branch `master`.
