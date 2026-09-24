@@ -38,6 +38,7 @@ from job_sniffer.sources.browser import (
     is_browser_closed_error,
     start_undetected_chrome,
 )
+from job_sniffer.sources.filters import text_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -90,17 +91,12 @@ class PracujJobSource:
         self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
-        logger.info(
-            "Starting Pracuj.pl search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
-        )
+        logger.info("Starting Pracuj.pl search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built Pracuj.pl search URL: %s", url)
         return self._collect_offers_with_selenium(
             url,
-            location=search.location,
+            location=text_filter_value(search.filters.get("location")),
             limit=search.limit,
         )
 
@@ -304,8 +300,8 @@ class PracujJobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
-    location = _slugify_location(search.location)
-    keywords = quote(search.keywords.strip(), safe="")
+    location = _slugify_location(text_filter_value(search.filters.get("location")))
+    keywords = quote(text_filter_value(search.filters.get("keywords")).strip(), safe="")
     if is_poland_location(location):
         return (
             f"https://www.pracuj.pl/praca/{keywords};kw"

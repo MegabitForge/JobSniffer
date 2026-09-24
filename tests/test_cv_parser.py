@@ -7,17 +7,17 @@ from job_sniffer.cv_parser import CVParseError, parse_cv_file
 
 def test_parse_text_cv(tmp_path: Path) -> None:
     cv_file = tmp_path / "cv.txt"
-    cv_file.write_text("Jan Kowalski\nPython Developer\nDoświadczenie: 4 lata", encoding="utf-8")
+    cv_file.write_text("John Smith\nPython Developer\nExperience: 4 years", encoding="utf-8")
     content = parse_cv_file(cv_file)
-    assert "Jan Kowalski" in content
+    assert "John Smith" in content
     assert "Python Developer" in content
 
 
 def test_parse_markdown_cv(tmp_path: Path) -> None:
     cv_file = tmp_path / "cv.md"
-    cv_file.write_text("# Jan Kowalski\n## Umiejętności\n- Python\n- Docker", encoding="utf-8")
+    cv_file.write_text("# John Smith\n## Skills\n- Python\n- Docker", encoding="utf-8")
     content = parse_cv_file(cv_file)
-    assert "# Jan Kowalski" in content
+    assert "# John Smith" in content
     assert "Docker" in content
 
 

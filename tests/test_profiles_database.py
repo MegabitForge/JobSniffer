@@ -44,20 +44,20 @@ def test_update_profile_name_and_limit(tmp_path: Path) -> None:
     with connect(tmp_path / "test3.sqlite") as session:
         init_db(session)
 
-        profile = create_profile(session, "Stary", offer_limit=5)
+        profile = create_profile(session, "Old", offer_limit=5)
         assert profile is not None
 
-        assert update_profile(session, profile.id, "Nowy", 10) is True
+        assert update_profile(session, profile.id, "New", 10) is True
         updated = get_profile(session, profile.id)
         assert updated is not None
-        assert updated.name == "Nowy"
+        assert updated.name == "New"
         assert updated.offer_limit == 10
 
         assert update_profile(session, profile.id, "  ", None) is False
-        other = create_profile(session, "Inny")
+        other = create_profile(session, "Other")
         assert other is not None
-        assert update_profile(session, profile.id, "Inny", None) is False
-        assert update_profile(session, 999, "Brak", None) is False
+        assert update_profile(session, profile.id, "Other", None) is False
+        assert update_profile(session, 999, "None", None) is False
 
 
 def test_new_profile_has_no_source_settings(tmp_path: Path) -> None:
@@ -137,7 +137,7 @@ def test_delete_profile_cascades_to_source_settings(tmp_path: Path) -> None:
     with connect(tmp_path / "test7.sqlite") as session:
         init_db(session)
 
-        profile = create_profile(session, "Do usunięcia")
+        profile = create_profile(session, "To be deleted")
         assert profile is not None
         save_profile_source_settings(
             session,

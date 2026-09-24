@@ -25,6 +25,7 @@ from job_sniffer.sources.base import (
     process_enriched_offers,
     wait_before_next_page,
 )
+from job_sniffer.sources.filters import text_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,7 @@ class NoFluffJobsSource:
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
-            "Starting NoFluffJobs search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
+            "Starting NoFluffJobs search: filters=%s limit=%s", search.filters, search.limit
         )
         offers = self._collect_listing_pages(search)
         new_offers = filter_new_offers(offers, self.duplicate_checker)
@@ -112,13 +110,13 @@ class NoFluffJobsSource:
         self._raise_if_stopped()
 
     def _fetch_listing_data(self, search: JobSearch, *, page: int) -> dict[str, Any]:
-        if is_poland_location(search.location):
+        if is_poland_location(text_filter_value(search.filters.get("location"))):
             response = httpx.get(
                 "https://nofluffjobs.com/api/joboffers/main",
                 params={
                     "salaryCurrency": "PLN",
                     "salaryPeriod": "MONTH",
-                    "criteria": search.keywords,
+                    "criteria": text_filter_value(search.filters.get("keywords")),
                     "page": page,
                 },
                 headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT},
@@ -204,13 +202,14 @@ def _map_posting(posting: dict[str, Any]) -> JobOffer:
 
 
 def build_search_url(search: JobSearch) -> str:
-    if is_poland_location(search.location):
+    location = text_filter_value(search.filters.get("location"))
+    if is_poland_location(location):
         return "https://nofluffjobs.com/pl"
-    location = _slugify_location(search.location)
-    keyword = quote(search.keywords.strip())
+    location_slug = _slugify_location(location)
+    keyword = quote(text_filter_value(search.filters.get("keywords")).strip())
     if not keyword:
-        return f"https://nofluffjobs.com/pl/{location}"
-    return f"https://nofluffjobs.com/pl/{location}?criteria={keyword}"
+        return f"https://nofluffjobs.com/pl/{location_slug}"
+    return f"https://nofluffjobs.com/pl/{location_slug}?criteria={keyword}"
 
 
 def _with_page(url: str, page: int) -> str:

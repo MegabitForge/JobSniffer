@@ -30,6 +30,7 @@ from job_sniffer.sources.base import (
     process_enriched_offers,
     wait_before_next_page,
 )
+from job_sniffer.sources.filters import text_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,7 @@ class BulldogjobSource:
         self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
-        logger.info(
-            "Starting Bulldogjob search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
-        )
+        logger.info("Starting Bulldogjob search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built Bulldogjob search URL: %s", url)
         offers = self._collect_listing_pages(url, limit=search.limit)
@@ -169,9 +165,10 @@ class BulldogjobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
+    location = text_filter_value(search.filters.get("location"))
     filters: list[str] = []
-    if not is_poland_location(search.location):
-        filters.append(f"city,{_slugify_location(search.location)}")
+    if not is_poland_location(location):
+        filters.append(f"city,{_slugify_location(location)}")
 
     if not filters:
         return "https://bulldogjob.pl/companies/jobs/s/page,1"

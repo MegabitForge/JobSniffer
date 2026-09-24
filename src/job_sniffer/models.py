@@ -10,10 +10,8 @@ from typing import Any
 class JobSearch:
     """Search criteria supported by job sources."""
 
-    keywords: str
-    location: str
+    filters: Mapping[str, str | list[str]]
     limit: int | None = None
-    source_filters: Mapping[str, str | list[str]] | None = None
 
 
 @dataclass(frozen=True)

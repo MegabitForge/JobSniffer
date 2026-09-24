@@ -12,7 +12,6 @@ import undetected_chromedriver as uc  # type: ignore[import-untyped]
 from selenium.common.exceptions import WebDriverException
 
 from job_sniffer.models import JobOffer, JobSearch
-from job_sniffer.sources._common import is_poland_location
 from job_sniffer.sources._next_data import extract_next_data
 from job_sniffer.sources._text import (
     clean_text,
@@ -38,6 +37,7 @@ from job_sniffer.sources.browser import (
     fetch_with_existing_browser,
     start_undetected_chrome,
 )
+from job_sniffer.sources.filters import text_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -70,24 +70,21 @@ class TheProtocolJobSource:
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
-            "Starting TheProtocol search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
+            "Starting TheProtocol search: filters=%s limit=%s", search.filters, search.limit
         )
         url = build_search_url(search)
         logger.info("Built TheProtocol search URL: %s", url)
-        return self._collect_offers_with_browser(url, search=search)
+        return self._collect_offers_with_browser(url, limit=search.limit)
 
-    def _collect_offers_with_browser(self, url: str, *, search: JobSearch) -> list[JobOffer]:
+    def _collect_offers_with_browser(self, url: str, *, limit: int | None) -> list[JobOffer]:
         logger.info("Starting one TheProtocol browser session for listing and detail pages")
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
             self._raise_if_stopped()
-            offers = self._collect_listing_pages(driver, url, limit=search.limit)
+            offers = self._collect_listing_pages(driver, url, limit=limit)
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
-            limited_offers = limit_offers(new_offers, search.limit)
+            limited_offers = limit_offers(new_offers, limit)
 
             enrich_total = len(limited_offers)
             enrich_processed = 0
@@ -225,38 +222,31 @@ _FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (
 
 
 def build_search_url(search: JobSearch) -> str:
-    keyword = quote(search.keywords.strip())
-    segments = _build_filter_segments(search.source_filters)
+    keyword = quote(text_filter_value(search.filters.get("keywords")).strip())
+    segments = _build_filter_segments(search.filters)
     if segments:
         url = f"https://theprotocol.it/filtry/{'/'.join(segments)}"
         if keyword:
             url = f"{url}?kw={keyword}"
         return url
-    if is_poland_location(search.location):
-        if not keyword:
-            return "https://theprotocol.it/praca"
-        return f"https://theprotocol.it/praca?kw={keyword}"
-    location = _slugify_location(search.location)
     if not keyword:
-        return f"https://theprotocol.it/filtry/{location};wp"
-    return f"https://theprotocol.it/filtry/{location};wp?kw={keyword}"
+        return "https://theprotocol.it/praca"
+    return f"https://theprotocol.it/praca?kw={keyword}"
 
 
-def _build_filter_segments(
-    source_filters: Mapping[str, str | list[str]] | None,
-) -> list[str]:
-    if not source_filters:
-        return []
+def _build_filter_segments(source_filters: Mapping[str, str | list[str]]) -> list[str]:
     segments: list[str] = []
     for key, code, slugify in _FILTER_SEGMENTS:
         values = _filter_values(source_filters.get(key))
         if not values:
             continue
         if slugify:
-            joined = ",".join(_slugify_location(value) for value in values)
+            slugs = [_slugify_location(value) for value in values]
+            joined = ",".join(slug for slug in slugs if slug)
         else:
             joined = ",".join(quote(value, safe="") for value in values)
-        segments.append(f"{joined};{code}")
+        if joined:
+            segments.append(f"{joined};{code}")
     return segments
 
 
@@ -334,7 +324,7 @@ def _slugify_location(location: str) -> str:
     value = unicodedata.normalize("NFKD", value)
     value = "".join(char for char in value if not unicodedata.combining(char))
     value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
-    return value or "polska"
+    return value
 
 
 def _format_location(offer: dict[str, Any]) -> str | None:

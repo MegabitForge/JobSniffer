@@ -47,4 +47,4 @@ Mam nadzieję, że to pomoże!"""
 
 def test_parse_evaluation_json_invalid() -> None:
     with pytest.raises((ValueError, TypeError, json.JSONDecodeError)):
-        parse_evaluation_json("Niepoprawny tekst bez klamer JSON")
+        parse_evaluation_json("Invalid text without JSON braces")
