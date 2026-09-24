@@ -3,6 +3,7 @@ import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 import flet as ft
@@ -11,17 +12,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from job_sniffer.config import AppConfig
 from job_sniffer.database import (
-    DB_PATH,
     ProfileRecord,
     ProfileSourceConfig,
     SaveStats,
-    connect,
+    db_session,
     get_profile,
     get_profile_source_settings,
-    init_db,
     list_profiles,
     offer_exists,
     save_offer,
+    source_enabled,
 )
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.services import EvaluationService
@@ -34,18 +34,16 @@ from job_sniffer.sources.base import (
 )
 from job_sniffer.sources.browser import BrowserFetchError
 from job_sniffer.sources.bulldogjob import BulldogjobSource
-from job_sniffer.sources.filters import get_source_filter_schema
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
 from job_sniffer.sources.olx import OlxJobSource
 from job_sniffer.sources.pracuj import PracujBlockedError, PracujJobSource
-from job_sniffer.sources.registry import SOURCE_DEFINITIONS
+from job_sniffer.sources.registry import ACTIVE_SOURCES, SOURCE_DEFINITIONS
 from job_sniffer.sources.theprotocol import TheProtocolJobSource
 from job_sniffer.ui.offers_view import OffersView
 from job_sniffer.ui.status_bar import StatusBar
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_SOURCES = tuple(source for source in SOURCE_DEFINITIONS if source.status == "active")
 ALL_SOURCES_KEY = "__all__"
 _MAX_LOG_LINES = 500
 
@@ -59,6 +57,14 @@ class ScanInterruptedError(RuntimeError):
         super().__init__(str(cause))
         self.offers = offers
         self.stats = stats
+
+
+@dataclass(frozen=True)
+class ScanPlan:
+    """Resolved inputs for a scan run."""
+
+    profile: ProfileRecord
+    settings: dict[str, ProfileSourceConfig]
 
 
 class ScanView:
@@ -134,20 +140,12 @@ class ScanView:
     def reload_profiles(self, *, update: bool = True) -> None:
         """Refresh the profile dropdown after profiles change."""
         try:
-            session = connect(DB_PATH)
-        except SQLAlchemyError as error:
-            logger.exception("Could not open database while loading profiles")
-            self._status_bar.set_scan(f"Błąd bazy danych: {error}")
-            return
-        try:
-            init_db(session)
-            self._profiles = list_profiles(session)
+            with db_session() as session:
+                self._profiles = list_profiles(session)
         except SQLAlchemyError as error:
             logger.exception("Could not load profiles")
             self._status_bar.set_scan(f"Błąd bazy danych: {error}")
             return
-        finally:
-            session.close()
 
         previous = self._profile_dropdown.value
         options = [
@@ -198,11 +196,7 @@ class ScanView:
             raise RuntimeError("Scan cancelled because the application is closing.")
 
         source_name = _source_name(source_key)
-        session = connect(DB_PATH)
-        try:
-            logger.info("Initializing SQLite schema")
-            init_db(session)
-
+        with db_session() as session:
             pre_enrich_duplicates = 0
 
             def duplicate_checker(offer: JobOffer) -> bool:
@@ -272,9 +266,6 @@ class ScanView:
                 duplicates=save_duplicates,
             )
             return saved_results, self._include_pre_enrich_duplicates(stats, pre_enrich_duplicates)
-        finally:
-            logger.info("Closing SQLite session")
-            session.close()
 
     @staticmethod
     def _include_pre_enrich_duplicates(stats: SaveStats, duplicates: int) -> SaveStats:
@@ -286,86 +277,50 @@ class ScanView:
             duplicates=stats.duplicates + duplicates,
         )
 
-    @staticmethod
-    def _build_search(
-        source_key: str,
-        settings: dict[str, ProfileSourceConfig],
-        offer_limit: int | None,
-    ) -> JobSearch:
-        stored = settings.get(source_key)
-        filters = stored.filters if stored else {}
-        schema_keys = {source_filter.key for source_filter in get_source_filter_schema(source_key)}
-
-        keywords = ""
-        location = ""
-        source_filters: dict[str, str | list[str]] = {}
-        for key, value in filters.items():
-            if key == "keywords":
-                keywords = value if isinstance(value, str) else ", ".join(value)
-            elif key == "location":
-                location = value if isinstance(value, str) else ", ".join(value)
-            elif key in schema_keys:
-                source_filters[key] = value
-        return JobSearch(
-            keywords=keywords,
-            location=location,
-            limit=offer_limit,
-            source_filters=source_filters or None,
-        )
-
-    async def _on_scan_click(self, _: Any) -> None:
-        logger.info("Scan initiated")
-        profile_value = self._profile_dropdown.value
-        if not profile_value:
-            self._status_bar.set_scan("Wybierz profil skanowania.")
-            return
+    def _load_profile_for_scan(self, profile_value: str) -> ScanPlan | None:
+        """Load the selected profile with its source settings; None reports the problem."""
         try:
             profile_id = int(profile_value)
         except ValueError:
             self._status_bar.set_scan("Wybierz profil skanowania.")
-            return
+            return None
 
+        profile: ProfileRecord | None
+        settings: dict[str, ProfileSourceConfig]
         try:
-            session = connect(DB_PATH)
-        except SQLAlchemyError as error:
-            self._status_bar.set_scan(f"Błąd bazy danych: {error}")
-            return
-        try:
-            init_db(session)
-            profile = get_profile(session, profile_id)
-            settings = (
-                get_profile_source_settings(session, profile_id) if profile is not None else {}
-            )
+            with db_session() as session:
+                profile = get_profile(session, profile_id)
+                settings = (
+                    get_profile_source_settings(session, profile_id) if profile is not None else {}
+                )
         except SQLAlchemyError as error:
             logger.exception("Could not load profile %s", profile_id)
             self._status_bar.set_scan(f"Błąd bazy danych: {error}")
-            return
-        finally:
-            session.close()
+            return None
 
         if profile is None:
             self._status_bar.set_scan("Profil nie istnieje.")
             self.reload_profiles()
-            return
+            return None
+        return ScanPlan(profile=profile, settings=settings)
 
+    def _select_source_keys(self, plan: ScanPlan) -> list[str] | None:
+        """Resolve which sources to scan; None means the scan cannot start."""
         source_value = self._source_dropdown.value or ALL_SOURCES_KEY
-        if source_value == ALL_SOURCES_KEY:
-            source_keys = [
-                source.key for source in ACTIVE_SOURCES if _source_enabled(settings, source.key)
-            ]
-            if not source_keys:
-                self._status_bar.set_scan("Profil nie ma włączonych źródeł.")
-                return
-        else:
-            source_keys = [source_value]
+        if source_value != ALL_SOURCES_KEY:
+            return [source_value]
+        source_keys = [
+            source.key for source in ACTIVE_SOURCES if source_enabled(plan.settings, source.key)
+        ]
+        if not source_keys:
+            self._status_bar.set_scan("Profil nie ma włączonych źródeł.")
+            return None
+        return source_keys
 
-        loop = asyncio.get_running_loop()
-        self._scan_button.disabled = True
-        self._stop_event.clear()
-        self._log_column.controls.clear()
-        self._progress_bar.value = None
-        self._page.update()
-
+    async def _run_source_scans(
+        self, plan: ScanPlan, source_keys: list[str], loop: asyncio.AbstractEventLoop
+    ) -> tuple[list[tuple[JobOffer, int]], list[str], list[str]]:
+        """Scan every selected source sequentially, collecting offers and result lines."""
         all_results: list[tuple[JobOffer, int]] = []
         summaries: list[str] = []
         errors: list[str] = []
@@ -373,7 +328,11 @@ class ScanView:
         for source_key in source_keys:
             if self._stop_event.is_set():
                 break
-            search = self._build_search(source_key, settings, profile.offer_limit)
+            stored = plan.settings.get(source_key)
+            search = JobSearch(
+                filters=stored.filters if stored else {},
+                limit=plan.profile.offer_limit,
+            )
             self._status_bar.set_scan(f"Skanowanie {_source_name(source_key)}...")
             try:
                 results, stats = await loop.run_in_executor(
@@ -401,6 +360,30 @@ class ScanView:
                 summaries.append(
                     f"{_source_name(source_key)}: zapisano {stats.inserted}/{stats.seen}"
                 )
+
+        return all_results, summaries, errors
+
+    async def _on_scan_click(self, _: Any) -> None:
+        logger.info("Scan initiated")
+        profile_value = self._profile_dropdown.value
+        if not profile_value:
+            self._status_bar.set_scan("Wybierz profil skanowania.")
+            return
+        plan = self._load_profile_for_scan(profile_value)
+        if plan is None:
+            return
+        source_keys = self._select_source_keys(plan)
+        if source_keys is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        self._scan_button.disabled = True
+        self._stop_event.clear()
+        self._log_column.controls.clear()
+        self._progress_bar.value = None
+        self._page.update()
+
+        all_results, summaries, errors = await self._run_source_scans(plan, source_keys, loop)
 
         can_eval = (
             bool(all_results)
@@ -476,8 +459,3 @@ def _source_name(source_key: str) -> str:
         if item.key == source_key:
             return item.name
     return source_key
-
-
-def _source_enabled(settings: dict[str, ProfileSourceConfig], source_key: str) -> bool:
-    stored = settings.get(source_key)
-    return stored is None or stored.enabled

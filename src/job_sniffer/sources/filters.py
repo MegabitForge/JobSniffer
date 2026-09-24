@@ -18,6 +18,11 @@ class SourceFilter:
     hint: str = ""
     options: tuple[FilterOption, ...] = ()
 
+    @property
+    def is_text(self) -> bool:
+        """Whether the filter is edited as free text (single or comma-separated values)."""
+        return self.kind in ("text", "multi_text")
+
 
 _THEPROTOCOL_SPECIALIZATIONS = (
     FilterOption("backend", "Backend"),
@@ -154,5 +159,21 @@ def get_source_filter_schema(source_key: str) -> tuple[SourceFilter, ...]:
     return _SOURCE_FILTER_SCHEMAS.get(source_key, ())
 
 
-def known_source_keys() -> frozenset[str]:
-    return frozenset(_SOURCE_FILTER_SCHEMAS)
+def text_filter_value(stored: str | list[str] | None) -> str:
+    """Flatten a stored text filter value into one string (display or search text)."""
+    if isinstance(stored, list):
+        return ", ".join(stored)
+    if isinstance(stored, str):
+        return stored
+    return ""
+
+
+def parse_text_filter_value(kind: FilterKind, raw: str) -> str | list[str] | None:
+    """Parse field text into a stored filter value; None means "no filter"."""
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if kind == "text":
+        return stripped
+    values = [part.strip() for part in stripped.split(",") if part.strip()]
+    return values or None

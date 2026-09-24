@@ -2,7 +2,8 @@
 
 import threading
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 from job_sniffer.models import JobOffer, JobOfferEvaluation
@@ -207,6 +208,26 @@ def _upgrade_legacy_baseline(bind: Engine) -> None:
                 "ALTER TABLE job_offer_evaluations ADD COLUMN explanation TEXT NOT NULL DEFAULT '';"
             )
         )
+
+
+@contextmanager
+def db_session(path: Path = DB_PATH) -> Iterator[Session]:
+    """Open a session on path, bring the schema up to date, and always close it."""
+    session = connect(path)
+    try:
+        init_db(session)
+        yield session
+    except SQLAlchemyError:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def source_enabled(settings: Mapping[str, ProfileSourceConfig], source_key: str) -> bool:
+    """Return whether a source is enabled in per-source profile settings."""
+    stored = settings.get(source_key)
+    return stored is None or stored.enabled
 
 
 def list_profiles(session: Session) -> list[ProfileRecord]:

@@ -37,6 +37,7 @@ from job_sniffer.sources.browser import (
     fetch_with_existing_browser,
     start_undetected_chrome,
 )
+from job_sniffer.sources.filters import text_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,7 @@ class OlxJobSource:
         self.enriched_offer_handler = enriched_offer_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
-        logger.info(
-            "Starting OLX search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
-        )
+        logger.info("Starting OLX search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built OLX search URL: %s", url)
         return self._collect_offers_with_browser(url, limit=search.limit)
@@ -205,12 +201,14 @@ class OlxJobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
-    keyword = quote("-".join(search.keywords.casefold().split()), safe="")
-    if not is_poland_location(search.location):
-        location = _slugify_location(search.location)
+    keywords = text_filter_value(search.filters.get("keywords"))
+    location = text_filter_value(search.filters.get("location"))
+    keyword = quote("-".join(keywords.casefold().split()), safe="")
+    if not is_poland_location(location):
+        location_slug = _slugify_location(location)
         if not keyword:
-            return f"https://www.olx.pl/praca/{quote(location, safe='')}/"
-        return f"https://www.olx.pl/praca/{quote(location, safe='')}/q-{keyword}/"
+            return f"https://www.olx.pl/praca/{quote(location_slug, safe='')}/"
+        return f"https://www.olx.pl/praca/{quote(location_slug, safe='')}/q-{keyword}/"
     if not keyword:
         return "https://www.olx.pl/praca/"
     return f"https://www.olx.pl/praca/q-{keyword}/"

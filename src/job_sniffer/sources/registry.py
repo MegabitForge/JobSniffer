@@ -59,3 +59,7 @@ SOURCE_DEFINITIONS: tuple[SourceDefinition, ...] = (
         icon="linkedin.png",
     ),
 )
+
+ACTIVE_SOURCES: tuple[SourceDefinition, ...] = tuple(
+    source for source in SOURCE_DEFINITIONS if source.status == "active"
+)

@@ -8,6 +8,7 @@ from linkedin_jobs_scraper.events import EventData, Events  # type: ignore[impor
 from linkedin_jobs_scraper.query import Query, QueryOptions  # type: ignore[import-untyped]
 
 from job_sniffer.models import JobOffer, JobSearch
+from job_sniffer.sources.filters import text_filter_value
 
 
 class LinkedInJobSource:
@@ -55,9 +56,9 @@ class LinkedInJobSource:
         scraper.on(Events.INVALID_SESSION, on_invalid_session)
 
         query = Query(
-            query=search.keywords,
+            query=text_filter_value(search.filters.get("keywords")),
             options=QueryOptions(
-                locations=[search.location],
+                locations=[text_filter_value(search.filters.get("location"))],
                 limit=search.limit,
                 apply_link=True,
             ),
