@@ -1,6 +1,8 @@
 import logging
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -169,19 +171,35 @@ def format_chrome_start_error(error: WebDriverException, profile_dir: Path) -> s
     return f"Chrome could not start: {error}"
 
 
+LINUX_CHROME_EXECUTABLES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+)
+
+
+def chrome_executable_candidates() -> list[Path]:
+    """Return possible Chrome executable locations for the current platform."""
+    if sys.platform == "win32":
+        return [
+            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+            Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
+        ]
+    return [Path(found) for name in LINUX_CHROME_EXECUTABLES if (found := shutil.which(name))]
+
+
 def detect_chrome_major_version() -> int | None:
-    candidates = (
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-        Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
-    )
-    for candidate in candidates:
+    for candidate in chrome_executable_candidates():
         if not candidate.exists():
             continue
 
-        directory_version = detect_chrome_major_version_from_directory(candidate.parent)
-        if directory_version is not None:
-            return directory_version
+        # Only Windows installs keep versioned subdirectories next to chrome.exe.
+        if sys.platform == "win32":
+            directory_version = detect_chrome_major_version_from_directory(candidate.parent)
+            if directory_version is not None:
+                return directory_version
 
         try:
             result = subprocess.run(
