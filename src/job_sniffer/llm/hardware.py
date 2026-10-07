@@ -1,9 +1,12 @@
 """Hardware and GPU acceleration detection."""
 
 import ctypes
+import glob
 import logging
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Literal
 
@@ -43,48 +46,7 @@ def detect_gpu() -> GPUInfo:
                 parts = [p.strip() for p in first_line.split(",")]
                 gpu_name = parts[0]
                 vram_mb = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-                # Check which CUDA runtime is actually installed
-                import glob
-                import os
-
-                cuda_path = os.environ.get("CUDA_PATH", "")
-                has_13 = False
-                has_12 = False
-
-                if cuda_path and os.path.exists(cuda_path):
-                    has_13 = bool(
-                        glob.glob(
-                            os.path.join(cuda_path, "bin", "**", "cudart64_13*.dll"), recursive=True
-                        )
-                    )
-                    has_12 = bool(
-                        glob.glob(
-                            os.path.join(cuda_path, "bin", "**", "cudart64_12*.dll"), recursive=True
-                        )
-                    )
-
-                if not has_13 and not has_12:
-                    for dll in ["cudart64_13.dll"]:
-                        try:
-                            ctypes.WinDLL(dll)
-                            has_13 = True
-                            break
-                        except OSError:
-                            pass
-                    if not has_13:
-                        for dll in ["cudart64_12.dll", "cudart64_11.dll"]:
-                            try:
-                                ctypes.WinDLL(dll)
-                                has_12 = True
-                                break
-                            except OSError:
-                                pass
-
-                backend_type = "vulkan"
-                if has_13:
-                    backend_type = "cuda_13"
-                elif has_12:
-                    backend_type = "cuda_12"
+                backend_type = _detect_cuda_backend()
 
                 return GPUInfo(
                     has_gpu=True,
@@ -95,15 +57,8 @@ def detect_gpu() -> GPUInfo:
         except (subprocess.SubprocessError, OSError, ValueError) as err:
             logger.debug("nvidia-smi query failed: %s", err)
 
-    # 2. Check for Vulkan loader dll (available on Windows with modern AMD/Intel/NVIDIA drivers)
-    has_vulkan = False
-    try:
-        ctypes.CDLL("vulkan-1.dll")
-        has_vulkan = True
-    except OSError, AttributeError:
-        has_vulkan = False
-
-    if has_vulkan:
+    # 2. Check for the Vulkan loader (shipped with modern AMD/Intel/NVIDIA drivers)
+    if _has_vulkan_loader():
         return GPUInfo(
             has_gpu=True,
             name="Zgodna karta graficzna (Vulkan GPU)",
@@ -118,6 +73,55 @@ def detect_gpu() -> GPUInfo:
         vram_mb=None,
         backend="cpu",
     )
+
+
+def _has_vulkan_loader() -> bool:
+    library = "vulkan-1.dll" if sys.platform == "win32" else "libvulkan.so.1"
+    try:
+        ctypes.CDLL(library)
+    except OSError, AttributeError:
+        return False
+    return True
+
+
+def _detect_cuda_backend() -> BackendType:
+    """Pick the llama-server backend for an NVIDIA GPU based on the installed CUDA runtime."""
+    # Prebuilt CUDA binaries of llama-server are published only for Windows;
+    # on other platforms NVIDIA GPUs are driven through Vulkan.
+    if sys.platform != "win32":
+        return "vulkan"
+
+    has_13 = False
+    has_12 = False
+
+    cuda_path = os.environ.get("CUDA_PATH", "")
+    if cuda_path and os.path.exists(cuda_path):
+        has_13 = bool(
+            glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_13*.dll"), recursive=True)
+        )
+        has_12 = bool(
+            glob.glob(os.path.join(cuda_path, "bin", "**", "cudart64_12*.dll"), recursive=True)
+        )
+
+    if not has_13 and not has_12:
+        has_13 = _can_load_windll("cudart64_13.dll")
+        if not has_13:
+            has_12 = _can_load_windll("cudart64_12.dll") or _can_load_windll("cudart64_11.dll")
+
+    if has_13:
+        return "cuda_13"
+    if has_12:
+        return "cuda_12"
+    return "vulkan"
+
+
+def _can_load_windll(name: str) -> bool:
+    """Check whether a Windows DLL can be loaded."""
+    try:
+        ctypes.WinDLL(name)  # type: ignore[attr-defined,unused-ignore]
+    except OSError, AttributeError:
+        return False
+    return True
 
 
 def format_gpu_summary(gpu: GPUInfo) -> str:

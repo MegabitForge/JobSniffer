@@ -1,11 +1,13 @@
 # Job Sniffer
 
-Job Sniffer is a Windows desktop application that will collect job offers and evaluate how well they match a candidate's resume using a LLM.
+Job Sniffer is a desktop application (Windows and Linux) that will collect job offers and evaluate how well they match a candidate's resume using a LLM.
 
 ## Requirements
 
 - Python 3.14
 - [uv](https://docs.astral.sh/uv/)
+- Google Chrome or Chromium (for scraping job boards)
+- Linux: GTK 3 runtime libraries required by the Flet desktop client
 
 ## Run
 
