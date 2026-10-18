@@ -30,12 +30,7 @@ from job_sniffer.sources.base import (
     ScanProgress,
     ScanReport,
 )
-from job_sniffer.sources.bulldogjob import BulldogjobSource
-from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
-from job_sniffer.sources.olx import OlxJobSource
-from job_sniffer.sources.pracuj import PracujJobSource
-from job_sniffer.sources.registry import ACTIVE_SOURCES, SOURCE_DEFINITIONS
-from job_sniffer.sources.theprotocol import TheProtocolJobSource
+from job_sniffer.sources.registry import ACTIVE_SOURCES, get_source_definition
 from job_sniffer.ui.offers_view import OffersView
 from job_sniffer.ui.status_bar import StatusBar
 
@@ -361,17 +356,10 @@ class ScanView:
 
 
 def _create_source(source_key: str, hooks: ScanHooks) -> JobSource:
-    if source_key == "pracuj":
-        return PracujJobSource(hooks)
-    if source_key == "olx":
-        return OlxJobSource(hooks)
-    if source_key == "theprotocol":
-        return TheProtocolJobSource(hooks)
-    if source_key == "nofluffjobs":
-        return NoFluffJobsSource(hooks)
-    if source_key == "bulldogjob":
-        return BulldogjobSource(hooks)
-    raise ValueError(f"Unsupported source: {source_key}")
+    create = get_source_definition(source_key).create
+    if create is None:
+        raise ValueError(f"Source {source_key} cannot be scanned")
+    return create(hooks)
 
 
 def _format_source_summary(source_name: str, report: ScanReport) -> str:
@@ -387,7 +375,4 @@ def _format_source_summary(source_name: str, report: ScanReport) -> str:
 
 
 def _source_name(source_key: str) -> str:
-    for item in SOURCE_DEFINITIONS:
-        if item.key == source_key:
-            return item.name
-    return source_key
+    return get_source_definition(source_key).name

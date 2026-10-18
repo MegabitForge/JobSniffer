@@ -20,9 +20,12 @@ from job_sniffer.sources.base import (
     ScanReport,
     scan_offers,
 )
-from job_sniffer.sources.filters import text_filter_value
+from job_sniffer.sources.filters import LOCATION_FILTER, SourceFilter
 
 logger = logging.getLogger(__name__)
+
+
+FILTERS: tuple[SourceFilter, ...] = (LOCATION_FILTER,)
 
 
 class NoFluffJobsSource:
@@ -59,7 +62,7 @@ class NoFluffJobsSource:
         return [_map_posting(posting) for posting in postings if isinstance(posting, dict)]
 
     def _fetch_listing_data(self, search: JobSearch, *, page: int) -> dict[str, Any]:
-        if is_poland_location(text_filter_value(search.filters.get("location"))):
+        if is_poland_location(search.text("location")):
             response = httpx.get(
                 "https://nofluffjobs.com/api/joboffers/main",
                 params={
@@ -141,7 +144,7 @@ def _map_posting(posting: dict[str, Any]) -> JobOffer:
 
 
 def build_search_url(search: JobSearch) -> str:
-    location = text_filter_value(search.filters.get("location"))
+    location = search.text("location")
     if is_poland_location(location):
         return "https://nofluffjobs.com/pl"
     return f"https://nofluffjobs.com/pl/{_slugify_location(location)}"

@@ -5,13 +5,32 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+FilterValue = str | list[str]
+
+
+def text_filter_value(stored: FilterValue | None) -> str:
+    """Flatten a stored filter value into one string; multiple values are comma-separated."""
+    if isinstance(stored, list):
+        return ", ".join(stored)
+    return stored or ""
+
 
 @dataclass(frozen=True)
 class JobSearch:
     """Search criteria supported by job sources."""
 
-    filters: Mapping[str, str | list[str]]
+    filters: Mapping[str, FilterValue]
     limit: int | None = None
+
+    def text(self, key: str) -> str:
+        """Return a filter as stripped text; an unset filter is an empty string."""
+        return text_filter_value(self.filters.get(key)).strip()
+
+    def values(self, key: str) -> list[str]:
+        """Return a filter as a list of non-empty values."""
+        stored = self.filters.get(key)
+        items = [stored] if isinstance(stored, str) else (stored or [])
+        return [item.strip() for item in items if item.strip()]
 
 
 @dataclass(frozen=True)

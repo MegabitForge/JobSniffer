@@ -1,30 +1,60 @@
-from job_sniffer.sources.filters import (
-    SourceFilter,
-    get_source_filter_schema,
-    parse_text_filter_value,
-    text_filter_value,
-)
-from job_sniffer.sources.registry import ACTIVE_SOURCES
+from collections.abc import Callable
 
-ACTIVE_SOURCE_KEYS = tuple(source_def.key for source_def in ACTIVE_SOURCES)
+import pytest
+
+from job_sniffer.models import FilterValue, JobSearch, text_filter_value
+from job_sniffer.sources import bulldogjob, nofluffjobs, olx, pracuj, theprotocol
+from job_sniffer.sources.base import ScanHooks
+from job_sniffer.sources.filters import SourceFilter, parse_text_filter_value
+from job_sniffer.sources.registry import ACTIVE_SOURCES, SourceDefinition, get_source_definition
+
+URL_BUILDERS: dict[str, Callable[[JobSearch], str]] = {
+    "pracuj": pracuj.build_search_url,
+    "olx": olx.build_search_url,
+    "theprotocol": theprotocol.build_search_url,
+    "nofluffjobs": nofluffjobs.build_search_url,
+    "bulldogjob": bulldogjob.build_search_url,
+}
 
 
-def test_every_active_source_has_a_filter_schema() -> None:
-    for key in ACTIVE_SOURCE_KEYS:
-        schema = get_source_filter_schema(key)
-        assert schema, f"Missing filter schema for source {key}"
+def _sample_value(source_filter: SourceFilter) -> FilterValue:
+    if source_filter.kind == "multi_select":
+        return [source_filter.options[0].value]
+    if source_filter.kind == "multi_text":
+        return ["Wrocław"]
+    return "Wrocław"
+
+
+@pytest.mark.parametrize("source_def", ACTIVE_SOURCES, ids=lambda source_def: source_def.key)
+def test_every_filter_shown_for_a_source_changes_its_search_url(
+    source_def: SourceDefinition,
+) -> None:
+    build_search_url = URL_BUILDERS[source_def.key]
+    unfiltered_url = build_search_url(JobSearch(filters={}))
+
+    assert source_def.filters, f"Źródło {source_def.key} nie ma filtrów"
+    for source_filter in source_def.filters:
+        search = JobSearch(filters={source_filter.key: _sample_value(source_filter)})
+        assert build_search_url(search) != unfiltered_url, (
+            f"Filtr {source_filter.key} nie zmienia wyszukiwania w {source_def.key}"
+        )
+
+
+@pytest.mark.parametrize("source_def", ACTIVE_SOURCES, ids=lambda source_def: source_def.key)
+def test_active_source_creates_a_scraper_reporting_its_key(source_def: SourceDefinition) -> None:
+    assert source_def.create is not None
+    assert source_def.create(ScanHooks()).source_name == source_def.key
 
 
 def test_filter_keys_are_unique_within_a_schema() -> None:
-    for key in ACTIVE_SOURCE_KEYS:
-        schema = get_source_filter_schema(key)
-        filter_keys = [item.key for item in schema]
+    for source_def in ACTIVE_SOURCES:
+        filter_keys = [item.key for item in source_def.filters]
         assert len(filter_keys) == len(set(filter_keys))
 
 
 def test_only_multi_select_filters_have_options() -> None:
-    for key in ACTIVE_SOURCE_KEYS:
-        for item in get_source_filter_schema(key):
+    for source_def in ACTIVE_SOURCES:
+        for item in source_def.filters:
             if item.kind == "multi_select":
                 assert item.options, f"Filter {item.key} has no options"
             else:
@@ -32,7 +62,7 @@ def test_only_multi_select_filters_have_options() -> None:
 
 
 def test_theprotocol_schema_contains_known_values() -> None:
-    schema = {item.key: item for item in get_source_filter_schema("theprotocol")}
+    schema = {item.key: item for item in get_source_definition("theprotocol").filters}
 
     required_keys = {"specializations", "levels", "work_modes", "contract_types"}
     assert required_keys <= schema.keys(), (
@@ -51,7 +81,7 @@ def test_theprotocol_schema_contains_known_values() -> None:
 
 
 def test_theprotocol_locations_is_multi_select() -> None:
-    schema = {item.key: item for item in get_source_filter_schema("theprotocol")}
+    schema = {item.key: item for item in get_source_definition("theprotocol").filters}
     locations = schema["locations"]
     assert locations.kind == "multi_select"
 
@@ -67,6 +97,16 @@ def test_text_filter_value_formats_stored_values() -> None:
     assert text_filter_value("") == ""
     assert text_filter_value("Warszawa") == "Warszawa"
     assert text_filter_value(["java", ".net"]) == "java, .net"
+
+
+def test_job_search_reads_text_and_multi_value_filters() -> None:
+    search = JobSearch(filters={"keywords": "  python ", "levels": ["junior", " ", "mid "]})
+
+    assert search.text("keywords") == "python"
+    assert search.text("location") == ""
+    assert search.values("levels") == ["junior", "mid"]
+    assert search.values("keywords") == ["python"]
+    assert search.values("location") == []
 
 
 def test_parse_text_filter_value_single_text() -> None:

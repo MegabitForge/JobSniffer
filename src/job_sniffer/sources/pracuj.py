@@ -33,7 +33,7 @@ from job_sniffer.sources.browser import (
     is_browser_closed_error,
     start_undetected_chrome,
 )
-from job_sniffer.sources.filters import text_filter_value
+from job_sniffer.sources.filters import KEYWORDS_FILTER, LOCATION_FILTER, SourceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,9 @@ DETAIL_SECTION_ORDER = (
     "What we offer",
     "Benefits",
 )
+
+
+FILTERS: tuple[SourceFilter, ...] = (KEYWORDS_FILTER, LOCATION_FILTER)
 
 
 class PracujBlockedError(RuntimeError):
@@ -81,7 +84,7 @@ class PracujJobSource:
         logger.info("Starting Pracuj.pl search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built Pracuj.pl search URL: %s", url)
-        location = text_filter_value(search.filters.get("location"))
+        location = search.text("location")
         try:
             driver = start_undetected_chrome(self.chrome_user_data_dir)
         except BrowserFetchError as error:
@@ -211,8 +214,8 @@ class PracujJobSource:
 
 
 def build_search_url(search: JobSearch) -> str:
-    location = _slugify_location(text_filter_value(search.filters.get("location")))
-    keywords = quote(text_filter_value(search.filters.get("keywords")).strip(), safe="")
+    location = _slugify_location(search.text("location"))
+    keywords = quote(search.text("keywords"), safe="")
     if is_poland_location(location):
         return (
             f"https://www.pracuj.pl/praca/{keywords};kw"

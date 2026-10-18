@@ -20,12 +20,8 @@ from job_sniffer.database import (
     source_enabled,
     update_profile,
 )
-from job_sniffer.sources.filters import (
-    SourceFilter,
-    get_source_filter_schema,
-    parse_text_filter_value,
-    text_filter_value,
-)
+from job_sniffer.models import text_filter_value
+from job_sniffer.sources.filters import SourceFilter, parse_text_filter_value
 from job_sniffer.sources.registry import ACTIVE_SOURCES, SourceDefinition
 from job_sniffer.ui.source_icons import source_icon_image
 
@@ -180,7 +176,7 @@ class ScanProfilesPanel:
         self._source_text_fields[source_def.key] = {}
         self._source_chips[source_def.key] = {}
 
-        schema = get_source_filter_schema(source_def.key)
+        schema = source_def.filters
         filter_controls: list[ft.Control] = [
             self._build_filter_control(source_def.key, source_filter, stored)
             for source_filter in schema
@@ -380,7 +376,7 @@ class ScanProfilesPanel:
             if switch is None:
                 continue
             filters: dict[str, str | list[str]] = {}
-            for source_filter in get_source_filter_schema(source_key):
+            for source_filter in source_def.filters:
                 if source_filter.is_text:
                     field = self._source_text_fields.get(source_key, {}).get(source_filter.key)
                     if field is None:

@@ -1,7 +1,7 @@
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
@@ -30,7 +30,7 @@ from job_sniffer.sources.browser import (
     fetch_with_existing_browser,
     start_undetected_chrome,
 )
-from job_sniffer.sources.filters import text_filter_value
+from job_sniffer.sources.filters import KEYWORDS_FILTER, FilterOption, SourceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,125 @@ class TheProtocolJobSource:
         )
 
 
+_SPECIALIZATIONS = (
+    FilterOption("backend", "Backend"),
+    FilterOption("frontend", "Frontend"),
+    FilterOption("devops", "DevOps"),
+    FilterOption("fullstack", "Fullstack"),
+    FilterOption("gamedev", "GameDev"),
+    FilterOption("mobile", "Mobile"),
+    FilterOption("embedded", "Embedded"),
+    FilterOption("architecture", "Architektura"),
+    FilterOption("qa-testing", "QA / Testing"),
+    FilterOption("security", "Bezpieczeństwo"),
+    FilterOption("ai-ml", "AI / ML"),
+    FilterOption("big-data-science", "Big Data / Data Science"),
+    FilterOption("helpdesk", "Helpdesk"),
+    FilterOption("it-admin", "Administracja IT"),
+    FilterOption("agile", "Agile"),
+    FilterOption("product-management", "Product Management"),
+    FilterOption("project-management", "Project Management"),
+    FilterOption("ux-ui", "UX / UI"),
+    FilterOption("business-analytics", "Business Analytics"),
+    FilterOption("sap-erp", "SAP / ERP"),
+    FilterOption("system-analytics", "System Analytics"),
+    FilterOption("data-analytics-bi", "Data Analytics / BI"),
+)
+
+_LEVELS = (
+    FilterOption("trainee", "Trainee"),
+    FilterOption("assistant", "Assistant"),
+    FilterOption("junior", "Junior"),
+    FilterOption("mid", "Mid"),
+    FilterOption("senior", "Senior"),
+    FilterOption("expert", "Expert"),
+    FilterOption("lead", "Lead"),
+)
+
+_WORK_MODES = (
+    FilterOption("zdalna", "Zdalna"),
+    FilterOption("hybrydowa", "Hybrydowa"),
+    FilterOption("stacjonarna", "Stacjonarna"),
+)
+
+_CONTRACT_TYPES = (
+    FilterOption("kontrakt-b2b", "Kontrakt B2B"),
+    FilterOption("umowa-o-prace", "Umowa o pracę"),
+    FilterOption("umowa-zlecenie", "Umowa zlecenie"),
+    FilterOption("umowa-o-dzielo", "Umowa o dzieło"),
+    FilterOption("umowa-na-zastepstwo", "Umowa na zastępstwo"),
+    FilterOption("umowa-agencyjna", "Umowa agencyjna"),
+    FilterOption("umowa-o-prace-tymczasowa", "Umowa o pracę tymczasową"),
+    FilterOption("umowa-o-staz-praktyki", "Umowa o staż / praktyki"),
+)
+
+_LOCATIONS = (
+    FilterOption("warszawa", "Warszawa"),
+    FilterOption("krakow", "Kraków"),
+    FilterOption("wroclaw", "Wrocław"),
+    FilterOption("gdansk", "Gdańsk"),
+    FilterOption("poznan", "Poznań"),
+    FilterOption("katowice", "Katowice"),
+    FilterOption("lodz", "Łódź"),
+    FilterOption("lublin", "Lublin"),
+    FilterOption("rzeszow", "Rzeszów"),
+    FilterOption("szczecin", "Szczecin"),
+    FilterOption("bialystok", "Białystok"),
+    FilterOption("bydgoszcz", "Bydgoszcz"),
+    FilterOption("torun", "Toruń"),
+    FilterOption("gdynia", "Gdynia"),
+    FilterOption("opole", "Opole"),
+    FilterOption("zielona-gora", "Zielona Góra"),
+    FilterOption("kielce", "Kielce"),
+    FilterOption("bielsko-biala", "Bielsko-Biała"),
+    FilterOption("olsztyn", "Olsztyn"),
+    FilterOption("czestochowa", "Częstochowa"),
+    FilterOption("sopot", "Sopot"),
+    FilterOption("ue", "UE"),
+    FilterOption("reszta-swiata", "Reszta świata"),
+)
+
+FILTERS: tuple[SourceFilter, ...] = (
+    KEYWORDS_FILTER,
+    SourceFilter(
+        key="specializations",
+        label="Specjalizacje",
+        kind="multi_select",
+        options=_SPECIALIZATIONS,
+    ),
+    SourceFilter(
+        key="technologies",
+        label="Technologie i narzędzia",
+        kind="multi_text",
+        hint="np. java, .net, c#",
+    ),
+    SourceFilter(
+        key="levels",
+        label="Poziom stanowiska",
+        kind="multi_select",
+        options=_LEVELS,
+    ),
+    SourceFilter(
+        key="locations",
+        label="Lokalizacje",
+        kind="multi_select",
+        options=_LOCATIONS,
+    ),
+    SourceFilter(
+        key="work_modes",
+        label="Tryb pracy",
+        kind="multi_select",
+        options=_WORK_MODES,
+    ),
+    SourceFilter(
+        key="contract_types",
+        label="Rodzaj umowy",
+        kind="multi_select",
+        options=_CONTRACT_TYPES,
+    ),
+)
+
+
 _FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (
     ("specializations", "sp", False),
     ("technologies", "t", False),
@@ -129,8 +248,8 @@ _FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (
 
 
 def build_search_url(search: JobSearch) -> str:
-    keyword = quote(text_filter_value(search.filters.get("keywords")).strip())
-    segments = _build_filter_segments(search.filters)
+    keyword = quote(search.text("keywords"))
+    segments = _build_filter_segments(search)
     if segments:
         url = f"https://theprotocol.it/filtry/{'/'.join(segments)}"
         if keyword:
@@ -141,10 +260,10 @@ def build_search_url(search: JobSearch) -> str:
     return f"https://theprotocol.it/praca?kw={keyword}"
 
 
-def _build_filter_segments(source_filters: Mapping[str, str | list[str]]) -> list[str]:
+def _build_filter_segments(search: JobSearch) -> list[str]:
     segments: list[str] = []
     for key, code, slugify in _FILTER_SEGMENTS:
-        values = _filter_values(source_filters.get(key))
+        values = search.values(key)
         if not values:
             continue
         if slugify:
@@ -155,15 +274,6 @@ def _build_filter_segments(source_filters: Mapping[str, str | list[str]]) -> lis
         if joined:
             segments.append(f"{joined};{code}")
     return segments
-
-
-def _filter_values(value: str | list[str] | None) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        stripped = value.strip()
-        return [stripped] if stripped else []
-    return [item.strip() for item in value if item.strip()]
 
 
 def _with_page(url: str, page: int) -> str:
