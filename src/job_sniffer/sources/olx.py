@@ -24,7 +24,10 @@ from job_sniffer.sources._text import (
 from job_sniffer.sources.base import (
     DuplicateChecker,
     EnrichedOfferHandler,
+    ProgressHandler,
+    ScanProgress,
     dedupe_listing_offers,
+    emit_progress,
     filter_new_offers,
     limit_offers,
     offer_listing_key,
@@ -57,6 +60,7 @@ class OlxJobSource:
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
         enriched_offer_handler: EnrichedOfferHandler | None = None,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
@@ -67,6 +71,7 @@ class OlxJobSource:
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
         self.enriched_offer_handler = enriched_offer_handler
+        self.progress_handler = progress_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info("Starting OLX search: filters=%s limit=%s", search.filters, search.limit)
@@ -85,6 +90,7 @@ class OlxJobSource:
                 limited_offers,
                 lambda offer: self._enrich_offer_from_detail(driver, offer),
                 self.enriched_offer_handler,
+                self.progress_handler,
             )
         finally:
             logger.info("Closing OLX browser session")
@@ -106,6 +112,9 @@ class OlxJobSource:
             logger.info("Fetching OLX listing page %s: %s", page, page_url)
             html_text = self._fetch_listing_html(driver, page_url)
             page_offers = parse_olx_offers(html_text)
+            emit_progress(
+                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
+            )
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s OLX offers from listing page %s, %s were new in this scan",

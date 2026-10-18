@@ -23,7 +23,10 @@ from job_sniffer.sources._text import (
 from job_sniffer.sources.base import (
     DuplicateChecker,
     EnrichedOfferHandler,
+    ProgressHandler,
+    ScanProgress,
     dedupe_listing_offers,
+    emit_progress,
     filter_new_offers,
     limit_offers,
     offer_listing_key,
@@ -48,6 +51,7 @@ class BulldogjobSource:
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
         enriched_offer_handler: EnrichedOfferHandler | None = None,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
@@ -56,6 +60,7 @@ class BulldogjobSource:
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
         self.enriched_offer_handler = enriched_offer_handler
+        self.progress_handler = progress_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info("Starting Bulldogjob search: filters=%s limit=%s", search.filters, search.limit)
@@ -69,6 +74,7 @@ class BulldogjobSource:
             limited_offers,
             self._enrich_offer_from_detail,
             self.enriched_offer_handler,
+            self.progress_handler,
         )
 
     def _collect_listing_pages(self, url: str, *, limit: int | None = None) -> list[JobOffer]:
@@ -87,6 +93,9 @@ class BulldogjobSource:
             )
             response.raise_for_status()
             page_offers = parse_bulldogjob_offers(response.text)
+            emit_progress(
+                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
+            )
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s Bulldogjob offers from listing page %s, %s were new in this scan",

@@ -25,6 +25,7 @@ from job_sniffer.sources.base import (
     ProgressHandler,
     ScanProgress,
     dedupe_listing_offers,
+    emit_progress,
     filter_new_offers,
     limit_offers,
     offer_listing_key,
@@ -85,23 +86,11 @@ class TheProtocolJobSource:
             new_offers = filter_new_offers(offers, self.duplicate_checker)
             logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
             limited_offers = limit_offers(new_offers, limit)
-
-            enrich_total = len(limited_offers)
-            enrich_processed = 0
-
-            def enrich_with_progress(offer: JobOffer) -> JobOffer | None:
-                nonlocal enrich_processed
-                enriched_offer = self._enrich_offer_from_detail(driver, offer)
-                enrich_processed += 1
-                self._emit_progress(
-                    ScanProgress(stage="enrich", current=enrich_processed, total=enrich_total)
-                )
-                return enriched_offer
-
             return process_enriched_offers(
                 limited_offers,
-                enrich_with_progress,
+                lambda offer: self._enrich_offer_from_detail(driver, offer),
                 self.enriched_offer_handler,
+                self.progress_handler,
             )
         finally:
             logger.info("Closing TheProtocol browser session")
@@ -122,7 +111,9 @@ class TheProtocolJobSource:
             page_url = _with_page(url, page)
             html_text = self._fetch_html(driver, page_url)
             page_offers = parse_theprotocol_offers(html_text)
-            self._emit_progress(ScanProgress(stage="listing", current=page, total=None))
+            emit_progress(
+                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
+            )
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s TheProtocol offers from listing page %s, %s were new in this scan",
@@ -205,10 +196,6 @@ class TheProtocolJobSource:
             raise BrowserFetchError(
                 "TheProtocol scan cancelled because the application is closing."
             )
-
-    def _emit_progress(self, progress: ScanProgress) -> None:
-        if self.progress_handler is not None:
-            self.progress_handler(progress)
 
 
 _FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (

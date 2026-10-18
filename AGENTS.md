@@ -11,7 +11,7 @@ uv run pytest                # full suite (~6 s, hermetic)
 uv run pytest tests/test_prompts.py -k markdown   # single file / single test
 uv run ruff check .          # lint (CI-enforced)
 uv run ruff format --check . # format check (CI-enforced; line length 100)
-uv run mypy                  # strict; NOT in CI; 2 pre-existing errors (see below)
+uv run mypy                  # strict; NOT in CI; 1 pre-existing error (services.py)
 uv run flet build windows    # desktop build -> build/windows (needs Windows + Developer Mode)
 uv run flet build linux      # desktop build -> build/linux (needs Linux)
 ```
@@ -23,7 +23,8 @@ uv run flet build linux      # desktop build -> build/linux (needs Linux)
 - `sources/` — one module per job board implementing the `JobSource` protocol (`search()`); `sources/registry.py` holds `SOURCE_DEFINITIONS` with status flags (LinkedIn disabled). Scrapers use undetected-chromedriver with per-source Chrome profile dirs (`.pracuj-profile/`, `.olx-profile/`, ...) created in the CWD — gitignored, they hold login state; leave them alone.
 - `llm/` — `catalog.py` (selectable GGUF models), `downloader.py` (fetches llama-server binaries + GGUF into `models_dir` under the platformdirs user data dir; Windows zip incl. CUDA builds, Linux tar.gz with Vulkan/CPU only — NVIDIA on Linux uses Vulkan), `runner.py` (llama-server subprocess lifecycle + `/health` polling), `ollama.py` / `openai_compat.py` providers, `prompts.py`, `hardware.py` (GPU/Vulkan/CUDA detection; CUDA DLL probing is Windows-only).
 - `services.py` — `EvaluationService` coordinates CV parsing, model download, llama-server lifecycle, and evaluations.
-- `database.py` — SQLAlchemy 2.0 ORM on SQLite. App DB path is CWD-relative `job_sniffer.sqlite` (`ui/offers_view.py`): running the app from the repo root creates it there (gitignored).
+- `database.py` — SQLAlchemy 2.0 ORM on SQLite. App DB path is CWD-relative `job_sniffer.sqlite` (`DB_PATH` in `database.py`): running the app from the repo root creates it there (gitignored). Open sessions with `db_session()`; it runs Alembic migrations to head (`src/job_sniffer/alembic/`), and pre-Alembic databases are stamped as `0001`.
+- Schema changes need a new migration: `uv run alembic upgrade head`, then `uv run alembic revision --autogenerate -m "..."` (dev DB `alembic_dev.sqlite` from `alembic.ini`, override with `JOB_SNIFFER_DB_URL`), review it, use sequential ids (`--rev-id 0003`). `tests/test_db_migrations.py` fails when migrations and ORM metadata drift.
 - `config.py` — JSON config in the platformdirs user config dir, not the repo.
 
 ## Conventions

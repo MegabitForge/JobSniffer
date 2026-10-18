@@ -252,8 +252,14 @@ def create_profile(
     return record
 
 
-def update_profile(session: Session, profile_id: int, name: str, offer_limit: int | None) -> bool:
-    """Update profile name and offer limit; return False when not possible."""
+def update_profile(
+    session: Session,
+    profile_id: int,
+    name: str,
+    offer_limit: int | None,
+    source_settings: Sequence[ProfileSourceConfig] = (),
+) -> bool:
+    """Update profile fields and source settings in one commit; return False when not possible."""
     record = session.get(ProfileRecord, profile_id)
     if record is None:
         return False
@@ -263,6 +269,8 @@ def update_profile(session: Session, profile_id: int, name: str, offer_limit: in
     record.name = stripped
     record.offer_limit = offer_limit
     try:
+        # Inside the try: the settings query autoflushes the rename, which may hit the unique name.
+        _upsert_source_settings(session, profile_id, source_settings)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -308,6 +316,13 @@ def save_profile_source_settings(
     session: Session, profile_id: int, settings: Sequence[ProfileSourceConfig]
 ) -> None:
     """Upsert per-source settings for a profile."""
+    _upsert_source_settings(session, profile_id, settings)
+    session.commit()
+
+
+def _upsert_source_settings(
+    session: Session, profile_id: int, settings: Sequence[ProfileSourceConfig]
+) -> None:
     existing = {
         record.source_key: record
         for record in session.scalars(
@@ -330,7 +345,6 @@ def save_profile_source_settings(
         else:
             record.enabled = setting.enabled
             record.filters = setting.filters
-    session.commit()
 
 
 def save_offer(session: Session, offer: JobOffer) -> int | None:

@@ -2,7 +2,7 @@
 
 import random
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from threading import Event
 from typing import Literal, Protocol
@@ -23,6 +23,12 @@ class ScanProgress:
 
 
 ProgressHandler = Callable[[ScanProgress], None]
+
+
+def emit_progress(progress_handler: ProgressHandler | None, progress: ScanProgress) -> None:
+    """Forward a progress report to the handler when one is attached."""
+    if progress_handler is not None:
+        progress_handler(progress)
 
 
 def dedupe_listing_offers(offers: Iterable[JobOffer]) -> list[JobOffer]:
@@ -83,14 +89,17 @@ def offer_listing_key(offer: JobOffer) -> tuple[str, str]:
 
 
 def process_enriched_offers(
-    offers: Iterable[JobOffer],
+    offers: Sequence[JobOffer],
     enrich_offer: Callable[[JobOffer], JobOffer | None],
     enriched_offer_handler: EnrichedOfferHandler | None,
+    progress_handler: ProgressHandler | None = None,
 ) -> list[JobOffer]:
-    """Enrich offers sequentially and optionally handle each one immediately."""
+    """Enrich offers sequentially, reporting progress and handling each one immediately."""
     result: list[JobOffer] = []
-    for offer in offers:
+    total = len(offers)
+    for index, offer in enumerate(offers, start=1):
         enriched_offer = enrich_offer(offer)
+        emit_progress(progress_handler, ScanProgress(stage="enrich", current=index, total=total))
         if enriched_offer is None:
             continue
         if enriched_offer_handler is not None and not enriched_offer_handler(enriched_offer):

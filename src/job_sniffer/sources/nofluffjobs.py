@@ -18,7 +18,10 @@ from job_sniffer.sources._text import clean_text, format_bullet_sections, join_u
 from job_sniffer.sources.base import (
     DuplicateChecker,
     EnrichedOfferHandler,
+    ProgressHandler,
+    ScanProgress,
     dedupe_listing_offers,
+    emit_progress,
     filter_new_offers,
     limit_offers,
     offer_listing_key,
@@ -43,6 +46,7 @@ class NoFluffJobsSource:
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
         enriched_offer_handler: EnrichedOfferHandler | None = None,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.detail_delay_seconds = detail_delay_seconds
@@ -51,6 +55,7 @@ class NoFluffJobsSource:
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
         self.enriched_offer_handler = enriched_offer_handler
+        self.progress_handler = progress_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info(
@@ -64,6 +69,7 @@ class NoFluffJobsSource:
             limited_offers,
             self._enrich_offer_from_detail,
             self.enriched_offer_handler,
+            self.progress_handler,
         )
 
     def _collect_listing_pages(self, search: JobSearch) -> list[JobOffer]:
@@ -80,6 +86,9 @@ class NoFluffJobsSource:
             page_offers = [
                 _map_posting(posting) for posting in postings if isinstance(posting, dict)
             ]
+            emit_progress(
+                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
+            )
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s NoFluffJobs offers from listing page %s, %s were new in this scan",
@@ -116,7 +125,7 @@ class NoFluffJobsSource:
                 params={
                     "salaryCurrency": "PLN",
                     "salaryPeriod": "MONTH",
-                    "criteria": text_filter_value(search.filters.get("keywords")),
+                    "criteria": "",
                     "page": page,
                 },
                 headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT},
@@ -205,11 +214,7 @@ def build_search_url(search: JobSearch) -> str:
     location = text_filter_value(search.filters.get("location"))
     if is_poland_location(location):
         return "https://nofluffjobs.com/pl"
-    location_slug = _slugify_location(location)
-    keyword = quote(text_filter_value(search.filters.get("keywords")).strip())
-    if not keyword:
-        return f"https://nofluffjobs.com/pl/{location_slug}"
-    return f"https://nofluffjobs.com/pl/{location_slug}?criteria={keyword}"
+    return f"https://nofluffjobs.com/pl/{_slugify_location(location)}"
 
 
 def _with_page(url: str, page: int) -> str:

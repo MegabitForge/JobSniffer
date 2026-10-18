@@ -17,7 +17,6 @@ from job_sniffer.database import (
     get_profile,
     get_profile_source_settings,
     list_profiles,
-    save_profile_source_settings,
     source_enabled,
     update_profile,
 )
@@ -349,19 +348,16 @@ class ScanProfilesPanel:
         if profile_id is None or name_field is None or limit_field is None:
             return
         name = name_field.value or ""
-        limit_text = (limit_field.value or "").strip()
-        offer_limit: int | None = None
-        if limit_text:
-            try:
-                offer_limit = int(limit_text)
-            except ValueError:
-                self._set_status("Limit ofert musi być liczbą całkowitą", error=True)
-                self._page.update()
-                return
+        try:
+            offer_limit = parse_offer_limit(limit_field.value or "")
+        except ValueError:
+            self._set_status("Limit ofert musi być dodatnią liczbą całkowitą", error=True)
+            self._page.update()
+            return
         settings = self._collect_source_settings()
         try:
             with self._session() as session:
-                updated = update_profile(session, profile_id, name, offer_limit)
+                updated = update_profile(session, profile_id, name, offer_limit, settings)
                 if not updated:
                     if name.strip():
                         self._set_status("Profil o tej nazwie już istnieje", error=True)
@@ -369,7 +365,6 @@ class ScanProfilesPanel:
                         self._set_status("Nazwa profilu nie może być pusta", error=True)
                     self._page.update()
                     return
-                save_profile_source_settings(session, profile_id, settings)
         except _DbError:
             self._page.update()
             return
@@ -414,6 +409,17 @@ class ScanProfilesPanel:
     def _notify_profiles_changed(self) -> None:
         if self.on_profiles_changed is not None:
             self.on_profiles_changed()
+
+
+def parse_offer_limit(raw: str) -> int | None:
+    """Parse the offer limit field; empty means no limit, anything below 1 is rejected."""
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    value = int(stripped)
+    if value < 1:
+        raise ValueError(f"Offer limit must be positive, got {value}")
+    return value
 
 
 def _filters_summary(stored: ProfileSourceConfig | None, schema: tuple[SourceFilter, ...]) -> str:

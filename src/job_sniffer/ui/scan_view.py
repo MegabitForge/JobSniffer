@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import flet as ft
-import httpx
 from sqlalchemy.exc import SQLAlchemyError
 
 from job_sniffer.config import AppConfig
@@ -32,11 +31,10 @@ from job_sniffer.sources.base import (
     ProgressHandler,
     ScanProgress,
 )
-from job_sniffer.sources.browser import BrowserFetchError
 from job_sniffer.sources.bulldogjob import BulldogjobSource
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
 from job_sniffer.sources.olx import OlxJobSource
-from job_sniffer.sources.pracuj import PracujBlockedError, PracujJobSource
+from job_sniffer.sources.pracuj import PracujJobSource
 from job_sniffer.sources.registry import ACTIVE_SOURCES, SOURCE_DEFINITIONS
 from job_sniffer.sources.theprotocol import TheProtocolJobSource
 from job_sniffer.ui.offers_view import OffersView
@@ -308,6 +306,12 @@ class ScanView:
         """Resolve which sources to scan; None means the scan cannot start."""
         source_value = self._source_dropdown.value or ALL_SOURCES_KEY
         if source_value != ALL_SOURCES_KEY:
+            if not source_enabled(plan.settings, source_value):
+                self._status_bar.set_scan(
+                    f"Źródło {_source_name(source_value)} jest wyłączone w profilu "
+                    f"„{plan.profile.name}”."
+                )
+                return None
             return [source_value]
         source_keys = [
             source.key for source in ACTIVE_SOURCES if source_enabled(plan.settings, source.key)
@@ -344,15 +348,8 @@ class ScanView:
                 summaries.append(
                     f"{_source_name(source_key)}: przerwane, zapisano {error.stats.inserted}"
                 )
-            except (
-                BrowserFetchError,
-                httpx.HTTPError,
-                PracujBlockedError,
-                SQLAlchemyError,
-                RuntimeError,
-                ValueError,
-                TypeError,
-            ) as error:
+            except Exception as error:
+                # One failing source must not abort the remaining ones.
                 logger.exception("Scan failed: source=%s", source_key)
                 errors.append(f"{_source_name(source_key)}: {error}")
             else:
@@ -383,28 +380,32 @@ class ScanView:
         self._progress_bar.value = None
         self._page.update()
 
-        all_results, summaries, errors = await self._run_source_scans(plan, source_keys, loop)
+        completed = False
+        try:
+            all_results, summaries, errors = await self._run_source_scans(plan, source_keys, loop)
 
-        can_eval = (
-            bool(all_results)
-            and self._config.auto_evaluate
-            and bool(self._evaluation_service.get_cv_text())
-        )
-        if all_results:
-            self._offers_view.add_new_offers(all_results, pending_evaluation=can_eval)
-            if self._on_scan_finished is not None:
-                self._on_scan_finished()
+            can_eval = (
+                bool(all_results)
+                and self._config.auto_evaluate
+                and bool(self._evaluation_service.get_cv_text())
+            )
+            if all_results:
+                self._offers_view.add_new_offers(all_results, pending_evaluation=can_eval)
+                if self._on_scan_finished is not None:
+                    self._on_scan_finished()
 
-        message = "Skanowanie profilu zakończone."
-        if summaries:
-            message += " " + "; ".join(summaries) + "."
-        if errors:
-            message += " Błędy: " + "; ".join(errors) + "."
-        self._status_bar.set_scan(message)
-
-        self._scan_button.disabled = False
-        self._progress_bar.value = 1.0
-        self._page.update()
+            message = "Skanowanie profilu zakończone."
+            if summaries:
+                message += " " + "; ".join(summaries) + "."
+            if errors:
+                message += " Błędy: " + "; ".join(errors) + "."
+            self._status_bar.set_scan(message)
+            completed = True
+        finally:
+            # Re-enable scanning even after an unexpected error so the user is never blocked.
+            self._scan_button.disabled = False
+            self._progress_bar.value = 1.0 if completed else 0.0
+            self._page.update()
 
         if can_eval:
             newly_inserted_ids = [inserted_id for _, inserted_id in reversed(all_results)]
@@ -425,12 +426,14 @@ def _create_source(
             stop_event=stop_event,
             duplicate_checker=duplicate_checker,
             enriched_offer_handler=enriched_offer_handler,
+            progress_handler=progress_handler,
         )
     if source_key == "olx":
         return OlxJobSource(
             stop_event=stop_event,
             duplicate_checker=duplicate_checker,
             enriched_offer_handler=enriched_offer_handler,
+            progress_handler=progress_handler,
         )
     if source_key == "theprotocol":
         return TheProtocolJobSource(
@@ -444,12 +447,14 @@ def _create_source(
             stop_event=stop_event,
             duplicate_checker=duplicate_checker,
             enriched_offer_handler=enriched_offer_handler,
+            progress_handler=progress_handler,
         )
     if source_key == "bulldogjob":
         return BulldogjobSource(
             stop_event=stop_event,
             duplicate_checker=duplicate_checker,
             enriched_offer_handler=enriched_offer_handler,
+            progress_handler=progress_handler,
         )
     raise ValueError(f"Unsupported source: {source_key}")
 

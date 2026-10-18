@@ -24,7 +24,10 @@ from job_sniffer.sources._text import (
 from job_sniffer.sources.base import (
     DuplicateChecker,
     EnrichedOfferHandler,
+    ProgressHandler,
+    ScanProgress,
     dedupe_listing_offers,
+    emit_progress,
     filter_new_offers,
     limit_offers,
     offer_listing_key,
@@ -79,6 +82,7 @@ class PracujJobSource:
         stop_event: threading.Event | None = None,
         duplicate_checker: DuplicateChecker | None = None,
         enriched_offer_handler: EnrichedOfferHandler | None = None,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         self.chrome_user_data_dir = chrome_user_data_dir
         self.selenium_wait_seconds = selenium_wait_seconds
@@ -89,6 +93,7 @@ class PracujJobSource:
         self.stop_event = stop_event
         self.duplicate_checker = duplicate_checker
         self.enriched_offer_handler = enriched_offer_handler
+        self.progress_handler = progress_handler
 
     def search(self, search: JobSearch) -> list[JobOffer]:
         logger.info("Starting Pracuj.pl search: filters=%s limit=%s", search.filters, search.limit)
@@ -132,6 +137,7 @@ class PracujJobSource:
                 limited_offers,
                 lambda offer: self._enrich_offer_from_detail(driver, offer),
                 self.enriched_offer_handler,
+                self.progress_handler,
             )
         except WebDriverException as error:
             logger.exception("Selenium could not load Pracuj.pl")
@@ -170,6 +176,9 @@ class PracujJobSource:
                 ) from error
 
             page_offers = parse_pracuj_offers(str(driver.page_source), source_name=self.source_name)
+            emit_progress(
+                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
+            )
             page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
             logger.info(
                 "Parsed %s Pracuj.pl offers from listing page %s, %s were new in this scan",
