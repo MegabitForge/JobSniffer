@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,7 +18,7 @@ from job_sniffer.database import (
     save_profile_source_settings,
 )
 from job_sniffer.models import JobOffer, JobSearch
-from job_sniffer.sources.base import EnrichedOfferHandler
+from job_sniffer.sources.base import Pacing, ScanHooks, ScanReport, scan_offers
 from job_sniffer.sources.registry import ACTIVE_SOURCES
 from job_sniffer.ui import scan_view
 from job_sniffer.ui.scan_view import ScanView
@@ -27,32 +26,46 @@ from job_sniffer.ui.scan_view import ScanView
 MakeView = Callable[[set[str]], ScanView]
 
 
-class _FakeSource:
-    """Scraper stand-in that saves one offer through the real handler, or fails."""
+NO_DELAYS = Pacing(page_delay_seconds=(0, 0), detail_delay_seconds=(0, 0))
 
-    def __init__(
-        self, source_key: str, error: Exception | None, handler: EnrichedOfferHandler
-    ) -> None:
+
+class _FakeSource:
+    """Scraper stand-in serving one listing page with one offer, or failing on it."""
+
+    def __init__(self, source_key: str, error: Exception | None, hooks: ScanHooks) -> None:
         self.source_name = source_key
         self._error = error
-        self._handler = handler
+        self._hooks = hooks
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
+        return scan_offers(
+            self._fetch_page,
+            lambda offer: offer,
+            search=search,
+            hooks=self._hooks,
+            pacing=NO_DELAYS,
+            label=self.source_name,
+        )
+
+    def _fetch_page(self, page: int) -> list[JobOffer]:
         if self._error is not None:
             raise self._error
-        offer = JobOffer(
-            source=self.source_name,
-            external_id=f"{self.source_name}-1",
-            title="Python Developer",
-            company="Acme",
-            location="Wrocław",
-            url=f"https://example.invalid/{self.source_name}/1",
-            salary=None,
-            description_text="Opis",
-            posted_at=None,
-            raw={},
-        )
-        return [offer] if self._handler(offer) else []
+        if page > 1:
+            return []
+        return [
+            JobOffer(
+                source=self.source_name,
+                external_id=f"{self.source_name}-1",
+                title="Python Developer",
+                company="Acme",
+                location="Wrocław",
+                url=f"https://example.invalid/{self.source_name}/1",
+                salary=None,
+                description_text="Opis",
+                posted_at=None,
+                raw={},
+            )
+        ]
 
 
 @dataclass
@@ -66,11 +79,9 @@ def scrapers(monkeypatch: pytest.MonkeyPatch) -> _Scrapers:
     """Replace the browser/network scraper factory; the DB and scan flow stay real."""
     scrapers = _Scrapers()
 
-    def fake_create_source(source_key: str, **kwargs: Any) -> _FakeSource:
+    def fake_create_source(source_key: str, hooks: ScanHooks) -> _FakeSource:
         scrapers.scanned.append(source_key)
-        return _FakeSource(
-            source_key, scrapers.errors.get(source_key), kwargs["enriched_offer_handler"]
-        )
+        return _FakeSource(source_key, scrapers.errors.get(source_key), hooks)
 
     monkeypatch.setattr(scan_view, "_create_source", fake_create_source)
     return scrapers
@@ -145,7 +156,7 @@ def test_failing_source_does_not_stop_the_remaining_sources(
 
     assert scrapers.scanned == ["pracuj", "olx"]
     assert _saved_offer_sources() == ["olx"]
-    assert "OLX: zapisano 1/1" in _last_status(status_bar)
+    assert "OLX: zapisano 1." in _last_status(status_bar)
     assert "Błędy: Pracuj.pl:" in _last_status(status_bar)
 
 

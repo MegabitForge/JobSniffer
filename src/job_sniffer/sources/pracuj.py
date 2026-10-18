@@ -1,7 +1,5 @@
 import logging
-import random
 import re
-import threading
 import time
 import unicodedata
 from dataclasses import replace
@@ -22,17 +20,11 @@ from job_sniffer.sources._text import (
     join_unique,
 )
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
-    ProgressHandler,
-    ScanProgress,
-    dedupe_listing_offers,
-    emit_progress,
-    filter_new_offers,
-    limit_offers,
-    offer_listing_key,
-    process_enriched_offers,
-    wait_before_next_page,
+    DEFAULT_PACING,
+    Pacing,
+    ScanHooks,
+    ScanReport,
+    scan_offers,
 )
 from job_sniffer.sources.browser import (
     BrowserClosedError,
@@ -72,72 +64,40 @@ class PracujJobSource:
 
     def __init__(
         self,
+        hooks: ScanHooks | None = None,
         *,
+        pacing: Pacing = DEFAULT_PACING,
         chrome_user_data_dir: str = ".pracuj-profile",
         selenium_wait_seconds: float = 120.0,
         cloudflare_wait_seconds: float = 45.0,
-        detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        max_pages: int = 20,
-        stop_event: threading.Event | None = None,
-        duplicate_checker: DuplicateChecker | None = None,
-        enriched_offer_handler: EnrichedOfferHandler | None = None,
-        progress_handler: ProgressHandler | None = None,
     ) -> None:
+        self.hooks = hooks or ScanHooks()
+        self.pacing = pacing
         self.chrome_user_data_dir = chrome_user_data_dir
         self.selenium_wait_seconds = selenium_wait_seconds
         self.cloudflare_wait_seconds = cloudflare_wait_seconds
-        self.detail_delay_seconds = detail_delay_seconds
-        self.pagination_delay_seconds = pagination_delay_seconds
-        self.max_pages = max_pages
-        self.stop_event = stop_event
-        self.duplicate_checker = duplicate_checker
-        self.enriched_offer_handler = enriched_offer_handler
-        self.progress_handler = progress_handler
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
         logger.info("Starting Pracuj.pl search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built Pracuj.pl search URL: %s", url)
-        return self._collect_offers_with_selenium(
-            url,
-            location=text_filter_value(search.filters.get("location")),
-            limit=search.limit,
-        )
-
-    def _collect_offers_with_selenium(
-        self,
-        url: str,
-        *,
-        location: str,
-        limit: int | None,
-    ) -> list[JobOffer]:
+        location = text_filter_value(search.filters.get("location"))
         try:
             driver = start_undetected_chrome(self.chrome_user_data_dir)
         except BrowserFetchError as error:
             raise PracujBlockedError(str(error)) from error
 
         try:
-            self._raise_if_stopped()
             logger.info("Opening Pracuj.pl in undetected Chrome")
-            time.sleep(random.uniform(0.8, 1.5))
-            self._raise_if_stopped()
-            offers = self._collect_listing_pages(driver, url, limit=limit)
-            matching_offers = _filter_by_location(offers, location)
-            new_offers = filter_new_offers(matching_offers, self.duplicate_checker)
-            limited_offers = limit_offers(new_offers, limit)
-            logger.info(
-                "Parsed %s Pracuj.pl offers, %s matched location, %s were new, enriching %s detail pages",
-                len(offers),
-                len(matching_offers),
-                len(new_offers),
-                len(limited_offers),
-            )
-            return process_enriched_offers(
-                limited_offers,
+            self.hooks.wait((0.8, 1.5))
+            return scan_offers(
+                lambda page: self._fetch_listing_page(driver, _with_page(url, page)),
                 lambda offer: self._enrich_offer_from_detail(driver, offer),
-                self.enriched_offer_handler,
-                self.progress_handler,
+                search=search,
+                hooks=self.hooks,
+                pacing=self.pacing,
+                label="Pracuj.pl",
+                accept=lambda offer: _matches_location(offer, location),
             )
         except WebDriverException as error:
             logger.exception("Selenium could not load Pracuj.pl")
@@ -153,77 +113,26 @@ class PracujJobSource:
             except WebDriverException:
                 logger.info("Pracuj.pl browser session was already closed")
 
-    def _collect_listing_pages(
-        self, driver: uc.Chrome, url: str, *, limit: int | None = None
-    ) -> list[JobOffer]:
-        offers: list[JobOffer] = []
-        seen_keys: set[tuple[str, str]] = set()
-
-        for page in range(1, self.max_pages + 1):
-            self._raise_if_stopped()
-            self._wait_before_listing_page(page)
-            page_url = _with_page(url, page)
-            logger.info("Opening Pracuj.pl listing page %s: %s", page, page_url)
-            driver.get(page_url)
-            accept_cookies_if_visible(driver)
-            try:
-                self._wait_for_next_data_payload(driver, page_label=f"listing page {page}")
-            except TimeoutException as error:
-                logger.exception("Timed out waiting for Pracuj.pl listing payload")
-                raise PracujBlockedError(
-                    "Pracuj.pl did not expose the listing payload in Selenium before timeout. "
-                    "Cloudflare may be blocking the automated browser."
-                ) from error
-
-            page_offers = parse_pracuj_offers(str(driver.page_source), source_name=self.source_name)
-            emit_progress(
-                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
-            )
-            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
-            logger.info(
-                "Parsed %s Pracuj.pl offers from listing page %s, %s were new in this scan",
-                len(page_offers),
-                page,
-                len(page_new),
-            )
-            if not page_offers or not page_new:
-                break
-            for offer in page_new:
-                seen_keys.add(offer_listing_key(offer))
-            offers.extend(page_new)
-            if limit is not None and len(offers) >= limit:
-                logger.info(
-                    "Reached requested limit of %s Pracuj.pl offers, stopping pagination",
-                    limit,
-                )
-                break
-        else:
-            logger.warning("Stopped Pracuj.pl pagination after max_pages=%s", self.max_pages)
-
-        return dedupe_listing_offers(offers)
-
-    def _wait_before_listing_page(self, page: int) -> None:
-        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
-        if delay is not None:
-            logger.info("Waited %.1fs before Pracuj.pl listing page %s", delay, page)
-        self._raise_if_stopped()
+    def _fetch_listing_page(self, driver: uc.Chrome, url: str) -> list[JobOffer]:
+        logger.info("Opening Pracuj.pl listing page: %s", url)
+        driver.get(url)
+        accept_cookies_if_visible(driver)
+        try:
+            self._wait_for_next_data_payload(driver, page_label="listing page")
+        except TimeoutException as error:
+            logger.exception("Timed out waiting for Pracuj.pl listing payload")
+            raise PracujBlockedError(
+                "Pracuj.pl did not expose the listing payload in Selenium before timeout. "
+                "Cloudflare may be blocking the automated browser."
+            ) from error
+        return parse_pracuj_offers(str(driver.page_source), source_name=self.source_name)
 
     def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
             logger.info("Skipping Pracuj.pl detail page because offer has no URL: %s", offer.title)
             return None
 
-        delay = random.uniform(*self.detail_delay_seconds)
-        logger.info(
-            "Waiting %.1f seconds before opening Pracuj.pl detail page: %s",
-            delay,
-            offer.url,
-        )
-        if self.stop_event and self.stop_event.wait(delay):
-            self._raise_if_stopped()
-
         try:
-            self._raise_if_stopped()
             logger.info("Opening Pracuj.pl detail page: %s", offer.url)
             driver.get(offer.url)
             accept_cookies_if_visible(driver)
@@ -277,7 +186,7 @@ class PracujJobSource:
 
         def has_payload_or_block(browser: uc.Chrome) -> bool:
             nonlocal challenge_started_at
-            if self._is_stopped():
+            if self.hooks.is_stopped():
                 return True
 
             page_source = browser.page_source
@@ -298,14 +207,7 @@ class PracujJobSource:
             return False
 
         WebDriverWait(driver, self.selenium_wait_seconds).until(has_payload_or_block)
-        self._raise_if_stopped()
-
-    def _is_stopped(self) -> bool:
-        return self.stop_event is not None and self.stop_event.is_set()
-
-    def _raise_if_stopped(self) -> None:
-        if self._is_stopped():
-            raise PracujBlockedError("Pracuj.pl scan cancelled because the application is closing.")
+        self.hooks.raise_if_stopped()
 
 
 def build_search_url(search: JobSearch) -> str:
@@ -448,14 +350,11 @@ def _map_offer(
     )
 
 
-def _filter_by_location(offers: list[JobOffer], location: str) -> list[JobOffer]:
-    if is_poland_location(location):
-        return offers
-    return [
-        offer
-        for offer in offers
-        if not _is_multi_location_variant(offer) or _location_matches(offer.location, location)
-    ]
+def _matches_location(offer: JobOffer, location: str) -> bool:
+    """Drop variants of multi-location listings that are outside the requested location."""
+    if is_poland_location(location) or not _is_multi_location_variant(offer):
+        return True
+    return _location_matches(offer.location, location)
 
 
 def _is_multi_location_variant(offer: JobOffer) -> bool:

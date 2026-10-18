@@ -1,9 +1,8 @@
 import json
 import logging
-import random
 import re
-import threading
 import unicodedata
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
@@ -22,17 +21,11 @@ from job_sniffer.sources._text import (
     join_unique,
 )
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
-    ProgressHandler,
-    ScanProgress,
-    dedupe_listing_offers,
-    emit_progress,
-    filter_new_offers,
-    limit_offers,
-    offer_listing_key,
-    process_enriched_offers,
-    wait_before_next_page,
+    DEFAULT_PACING,
+    Pacing,
+    ScanHooks,
+    ScanReport,
+    scan_offers,
 )
 from job_sniffer.sources.browser import (
     BrowserClosedError,
@@ -50,47 +43,34 @@ class OlxJobSource:
 
     def __init__(
         self,
+        hooks: ScanHooks | None = None,
         *,
+        pacing: Pacing = DEFAULT_PACING,
         chrome_user_data_dir: str = ".olx-profile",
         timeout_seconds: float = 90.0,
         page_load_timeout_seconds: float = 5.0,
-        detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        max_pages: int = 20,
-        stop_event: threading.Event | None = None,
-        duplicate_checker: DuplicateChecker | None = None,
-        enriched_offer_handler: EnrichedOfferHandler | None = None,
-        progress_handler: ProgressHandler | None = None,
     ) -> None:
+        self.hooks = hooks or ScanHooks()
+        self.pacing = pacing
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
         self.page_load_timeout_seconds = page_load_timeout_seconds
-        self.detail_delay_seconds = detail_delay_seconds
-        self.pagination_delay_seconds = pagination_delay_seconds
-        self.max_pages = max_pages
-        self.stop_event = stop_event
-        self.duplicate_checker = duplicate_checker
-        self.enriched_offer_handler = enriched_offer_handler
-        self.progress_handler = progress_handler
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
         logger.info("Starting OLX search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built OLX search URL: %s", url)
-        return self._collect_offers_with_browser(url, limit=search.limit)
-
-    def _collect_offers_with_browser(self, url: str, *, limit: int | None) -> list[JobOffer]:
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
-            offers = self._collect_listing_pages(driver, url, limit=limit)
-            new_offers = filter_new_offers(offers, self.duplicate_checker)
-            logger.info("Parsed %s OLX offers, %s were new", len(offers), len(new_offers))
-            limited_offers = limit_offers(new_offers, limit)
-            return process_enriched_offers(
-                limited_offers,
+            return scan_offers(
+                lambda page: parse_olx_offers(
+                    self._fetch_html(driver, _with_page(url, page), _browser_has_olx_offers)
+                ),
                 lambda offer: self._enrich_offer_from_detail(driver, offer),
-                self.enriched_offer_handler,
-                self.progress_handler,
+                search=search,
+                hooks=self.hooks,
+                pacing=self.pacing,
+                label="OLX",
             )
         finally:
             logger.info("Closing OLX browser session")
@@ -99,83 +79,31 @@ class OlxJobSource:
             except WebDriverException:
                 logger.info("OLX browser session was already closed")
 
-    def _collect_listing_pages(
-        self, driver: uc.Chrome, url: str, *, limit: int | None = None
-    ) -> list[JobOffer]:
-        offers: list[JobOffer] = []
-        seen_keys: set[tuple[str, str]] = set()
-
-        for page in range(1, self.max_pages + 1):
-            self._raise_if_stopped()
-            self._wait_before_listing_page(page)
-            page_url = _with_page(url, page)
-            logger.info("Fetching OLX listing page %s: %s", page, page_url)
-            html_text = self._fetch_listing_html(driver, page_url)
-            page_offers = parse_olx_offers(html_text)
-            emit_progress(
-                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
-            )
-            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
-            logger.info(
-                "Parsed %s OLX offers from listing page %s, %s were new in this scan",
-                len(page_offers),
-                page,
-                len(page_new),
-            )
-            if not page_offers or not page_new:
-                break
-            for offer in page_new:
-                seen_keys.add(offer_listing_key(offer))
-            offers.extend(page_new)
-            if limit is not None and len(offers) >= limit:
-                logger.info(
-                    "Reached requested limit of %s OLX offers, stopping pagination",
-                    limit,
-                )
-                break
-        else:
-            logger.warning("Stopped OLX pagination after max_pages=%s", self.max_pages)
-
-        return dedupe_listing_offers(offers)
-
-    def _wait_before_listing_page(self, page: int) -> None:
-        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
-        if delay is not None:
-            logger.info("Waited %.1fs before OLX listing page %s", delay, page)
-        self._raise_if_stopped()
-
-    def _fetch_listing_html(self, driver: uc.Chrome, url: str) -> str:
-        return fetch_with_existing_browser(
+    def _fetch_html(
+        self, driver: uc.Chrome, url: str, is_ready: Callable[[uc.Chrome], bool]
+    ) -> str:
+        logger.info("Fetching OLX page: %s", url)
+        html_text = fetch_with_existing_browser(
             driver,
             url,
             timeout_seconds=self.timeout_seconds,
             page_load_timeout_seconds=self.page_load_timeout_seconds,
             return_partial_on_timeout=True,
-            wait_until=lambda browser: self._is_stopped() or _browser_has_olx_offers(browser),
+            wait_until=lambda browser: self.hooks.is_stopped() or is_ready(browser),
         )
-
-    def _fetch_detail_html(self, driver: uc.Chrome, url: str) -> str:
-        return fetch_with_existing_browser(
-            driver,
-            url,
-            timeout_seconds=self.timeout_seconds,
-            page_load_timeout_seconds=self.page_load_timeout_seconds,
-            return_partial_on_timeout=True,
-            wait_until=lambda browser: self._is_stopped() or _browser_has_olx_detail(browser),
-        )
+        # The wait ends early on stop; the partial page must not be parsed.
+        self.hooks.raise_if_stopped()
+        return html_text
 
     def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
             logger.warning("Skipping OLX offer without a detail URL: %s", offer.title)
             return None
 
-        delay = random.uniform(*self.detail_delay_seconds)
-        logger.info("Waiting %.1fs before OLX detail fetch: %s", delay, offer.url)
-        if self.stop_event and self.stop_event.wait(delay):
-            self._raise_if_stopped()
-
         try:
-            detail = parse_olx_offer_detail(self._fetch_detail_html(driver, offer.url))
+            detail = parse_olx_offer_detail(
+                self._fetch_html(driver, offer.url, _browser_has_olx_detail)
+            )
         except BrowserClosedError:
             raise
         except BrowserFetchError, TypeError, ValueError, WebDriverException:
@@ -200,13 +128,6 @@ class OlxJobSource:
             posted_at=_clean(detail.get("posted_at")) or offer.posted_at,
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
-
-    def _is_stopped(self) -> bool:
-        return self.stop_event is not None and self.stop_event.is_set()
-
-    def _raise_if_stopped(self) -> None:
-        if self._is_stopped():
-            raise BrowserFetchError("OLX scan cancelled because the application is closing.")
 
 
 def build_search_url(search: JobSearch) -> str:

@@ -1,8 +1,6 @@
 import json
 import logging
-import random
 import re
-import threading
 import unicodedata
 from dataclasses import replace
 from typing import Any
@@ -21,17 +19,11 @@ from job_sniffer.sources._text import (
     join_unique,
 )
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
-    ProgressHandler,
-    ScanProgress,
-    dedupe_listing_offers,
-    emit_progress,
-    filter_new_offers,
-    limit_offers,
-    offer_listing_key,
-    process_enriched_offers,
-    wait_before_next_page,
+    DEFAULT_PACING,
+    Pacing,
+    ScanHooks,
+    ScanReport,
+    scan_offers,
 )
 from job_sniffer.sources.filters import text_filter_value
 
@@ -43,108 +35,49 @@ class BulldogjobSource:
 
     def __init__(
         self,
+        hooks: ScanHooks | None = None,
         *,
+        pacing: Pacing = DEFAULT_PACING,
         timeout_seconds: float = 30.0,
-        detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        max_pages: int = 20,
-        stop_event: threading.Event | None = None,
-        duplicate_checker: DuplicateChecker | None = None,
-        enriched_offer_handler: EnrichedOfferHandler | None = None,
-        progress_handler: ProgressHandler | None = None,
     ) -> None:
+        self.hooks = hooks or ScanHooks()
+        self.pacing = pacing
         self.timeout_seconds = timeout_seconds
-        self.detail_delay_seconds = detail_delay_seconds
-        self.pagination_delay_seconds = pagination_delay_seconds
-        self.max_pages = max_pages
-        self.stop_event = stop_event
-        self.duplicate_checker = duplicate_checker
-        self.enriched_offer_handler = enriched_offer_handler
-        self.progress_handler = progress_handler
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
         logger.info("Starting Bulldogjob search: filters=%s limit=%s", search.filters, search.limit)
         url = build_search_url(search)
         logger.info("Built Bulldogjob search URL: %s", url)
-        offers = self._collect_listing_pages(url, limit=search.limit)
-        new_offers = filter_new_offers(offers, self.duplicate_checker)
-        logger.info("Parsed %s Bulldogjob offers, %s were new", len(offers), len(new_offers))
-        limited_offers = limit_offers(new_offers, search.limit)
-        return process_enriched_offers(
-            limited_offers,
+        return scan_offers(
+            lambda page: self._fetch_listing_page(_with_page(url, page)),
             self._enrich_offer_from_detail,
-            self.enriched_offer_handler,
-            self.progress_handler,
+            search=search,
+            hooks=self.hooks,
+            pacing=self.pacing,
+            label="Bulldogjob",
         )
 
-    def _collect_listing_pages(self, url: str, *, limit: int | None = None) -> list[JobOffer]:
-        offers: list[JobOffer] = []
-        seen_keys: set[tuple[str, str]] = set()
+    def _fetch_listing_page(self, url: str) -> list[JobOffer]:
+        logger.info("Fetching Bulldogjob listing page: %s", url)
+        return parse_bulldogjob_offers(self._get_html(url))
 
-        for page in range(1, self.max_pages + 1):
-            self._raise_if_stopped()
-            self._wait_before_listing_page(page)
-            page_url = _with_page(url, page)
-            logger.info("Fetching Bulldogjob listing page %s: %s", page, page_url)
-            response = httpx.get(
-                page_url,
-                headers={"Accept": "text/html", "User-Agent": DEFAULT_USER_AGENT},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            page_offers = parse_bulldogjob_offers(response.text)
-            emit_progress(
-                self.progress_handler, ScanProgress(stage="listing", current=page, total=None)
-            )
-            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
-            logger.info(
-                "Parsed %s Bulldogjob offers from listing page %s, %s were new in this scan",
-                len(page_offers),
-                page,
-                len(page_new),
-            )
-            if not page_offers or not page_new:
-                break
-            for offer in page_new:
-                seen_keys.add(offer_listing_key(offer))
-            offers.extend(page_new)
-            if limit is not None and len(offers) >= limit:
-                logger.info(
-                    "Reached requested limit of %s Bulldogjob offers, stopping pagination",
-                    limit,
-                )
-                break
-        else:
-            logger.warning("Stopped Bulldogjob pagination after max_pages=%s", self.max_pages)
-
-        return dedupe_listing_offers(offers)
-
-    def _wait_before_listing_page(self, page: int) -> None:
-        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
-        if delay is not None:
-            logger.info("Waited %.1fs before Bulldogjob listing page %s", delay, page)
-        self._raise_if_stopped()
+    def _get_html(self, url: str) -> str:
+        response = httpx.get(
+            url,
+            headers={"Accept": "text/html", "User-Agent": DEFAULT_USER_AGENT},
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.text
 
     def _enrich_offer_from_detail(self, offer: JobOffer) -> JobOffer | None:
         if not offer.url:
             logger.warning("Skipping Bulldogjob offer without a detail URL: %s", offer.title)
             return None
 
-        delay = random.uniform(*self.detail_delay_seconds)
-        logger.info("Waiting %.1fs before Bulldogjob detail fetch: %s", delay, offer.url)
-        if self.stop_event and self.stop_event.wait(delay):
-            self._raise_if_stopped()
-
-        self._raise_if_stopped()
         logger.info("Fetching Bulldogjob detail page: %s", offer.url)
         try:
-            response = httpx.get(
-                offer.url,
-                headers={"Accept": "text/html", "User-Agent": DEFAULT_USER_AGENT},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            detail = parse_bulldogjob_offer_detail(response.text)
+            detail = parse_bulldogjob_offer_detail(self._get_html(offer.url))
         except httpx.HTTPError, TypeError, ValueError:
             logger.exception("Could not enrich Bulldogjob offer from detail page: %s", offer.url)
             return None
@@ -167,10 +100,6 @@ class BulldogjobSource:
             posted_at=_clean(detail.get("posted_at")) or offer.posted_at,
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
-
-    def _raise_if_stopped(self) -> None:
-        if self.stop_event is not None and self.stop_event.is_set():
-            raise RuntimeError("Bulldogjob scan cancelled because the application is closing.")
 
 
 def build_search_url(search: JobSearch) -> str:

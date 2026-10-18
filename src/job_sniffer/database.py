@@ -144,15 +144,6 @@ _ = Index(
 
 
 @dataclass(frozen=True)
-class SaveStats:
-    """Summary of a batch save operation."""
-
-    seen: int
-    inserted: int
-    duplicates: int
-
-
-@dataclass(frozen=True)
 class ProfileSourceConfig:
     """Per-source configuration snapshot stored within a scan profile."""
 

@@ -13,7 +13,6 @@ from job_sniffer.config import AppConfig
 from job_sniffer.database import (
     ProfileRecord,
     ProfileSourceConfig,
-    SaveStats,
     db_session,
     get_profile,
     get_profile_source_settings,
@@ -25,11 +24,11 @@ from job_sniffer.database import (
 from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.services import EvaluationService
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
     JobSource,
     ProgressHandler,
+    ScanHooks,
     ScanProgress,
+    ScanReport,
 )
 from job_sniffer.sources.bulldogjob import BulldogjobSource
 from job_sniffer.sources.nofluffjobs import NoFluffJobsSource
@@ -49,12 +48,9 @@ _MAX_LOG_LINES = 500
 class ScanInterruptedError(RuntimeError):
     """Report a failed scan together with offers already saved during it."""
 
-    def __init__(
-        self, cause: Exception, offers: list[tuple[JobOffer, int]], stats: SaveStats
-    ) -> None:
+    def __init__(self, cause: Exception, offers: list[tuple[JobOffer, int]]) -> None:
         super().__init__(str(cause))
         self.offers = offers
-        self.stats = stats
 
 
 @dataclass(frozen=True)
@@ -188,92 +184,45 @@ class ScanView:
 
     def _scan_source(
         self, source_key: str, search: JobSearch, loop: asyncio.AbstractEventLoop
-    ) -> tuple[list[tuple[JobOffer, int]], SaveStats]:
+    ) -> tuple[list[tuple[JobOffer, int]], ScanReport]:
         logger.info("Fetching offers: source=%s", source_key)
-        if self._stop_event.is_set():
-            raise RuntimeError("Scan cancelled because the application is closing.")
-
         source_name = _source_name(source_key)
+        saved_results: list[tuple[JobOffer, int]] = []
         with db_session() as session:
-            pre_enrich_duplicates = 0
-
-            def duplicate_checker(offer: JobOffer) -> bool:
-                nonlocal pre_enrich_duplicates
-                exists = offer_exists(session, offer)
-                if exists:
-                    pre_enrich_duplicates += 1
-                return exists
-
-            saved_results: list[tuple[JobOffer, int]] = []
-            save_seen = 0
-            save_duplicates = 0
 
             def save_enriched_offer(offer: JobOffer) -> bool:
-                nonlocal save_seen, save_duplicates
-                if self._stop_event.is_set():
-                    raise RuntimeError("Scan cancelled because the application is closing.")
-                save_seen += 1
                 inserted_id = save_offer(session, offer)
-                if inserted_id is not None:
+                if inserted_id is None:
                     logger.info(
-                        "Saved enriched offer immediately: %s - %s (id=%s)",
-                        offer.title,
-                        offer.company,
-                        inserted_id,
+                        "Skipped duplicate after enrich: %s - %s", offer.title, offer.company
                     )
-                    saved_results.append((offer, inserted_id))
-                    self._append_log_line(loop, f"{offer.title} — {offer.company} — {source_name}")
-                    return True
-
-                save_duplicates += 1
+                    return False
                 logger.info(
-                    "Skipped duplicate after enrich: %s - %s",
+                    "Saved enriched offer immediately: %s - %s (id=%s)",
                     offer.title,
                     offer.company,
+                    inserted_id,
                 )
-                return False
+                saved_results.append((offer, inserted_id))
+                self._append_log_line(loop, f"{offer.title} — {offer.company} — {source_name}")
+                return True
 
+            hooks = ScanHooks(
+                stop_event=self._stop_event,
+                duplicate_checker=lambda offer: offer_exists(session, offer),
+                enriched_offer_handler=save_enriched_offer,
+                progress_handler=self._make_progress_handler(loop),
+            )
             try:
-                _create_source(
-                    source_key,
-                    stop_event=self._stop_event,
-                    duplicate_checker=duplicate_checker,
-                    enriched_offer_handler=save_enriched_offer,
-                    progress_handler=self._make_progress_handler(loop),
-                ).search(search)
+                hooks.raise_if_stopped()
+                report = _create_source(source_key, hooks).search(search)
             except Exception as error:
                 if not saved_results:
                     raise
-                stats = self._include_pre_enrich_duplicates(
-                    SaveStats(
-                        seen=save_seen,
-                        inserted=len(saved_results),
-                        duplicates=save_duplicates,
-                    ),
-                    pre_enrich_duplicates,
-                )
-                raise ScanInterruptedError(error, saved_results, stats) from error
+                raise ScanInterruptedError(error, saved_results) from error
 
-            if self._stop_event.is_set():
-                raise RuntimeError("Scan cancelled because the application is closing.")
-
-            logger.info("Saved %s enriched offers from %s", len(saved_results), source_key)
-            stats = SaveStats(
-                seen=save_seen,
-                inserted=len(saved_results),
-                duplicates=save_duplicates,
-            )
-            return saved_results, self._include_pre_enrich_duplicates(stats, pre_enrich_duplicates)
-
-    @staticmethod
-    def _include_pre_enrich_duplicates(stats: SaveStats, duplicates: int) -> SaveStats:
-        if duplicates == 0:
-            return stats
-        return SaveStats(
-            seen=stats.seen + duplicates,
-            inserted=stats.inserted,
-            duplicates=stats.duplicates + duplicates,
-        )
+        logger.info("Saved %s enriched offers from %s", len(saved_results), source_key)
+        return saved_results, report
 
     def _load_profile_for_scan(self, profile_value: str) -> ScanPlan | None:
         """Load the selected profile with its source settings; None reports the problem."""
@@ -339,14 +288,14 @@ class ScanView:
             )
             self._status_bar.set_scan(f"Skanowanie {_source_name(source_key)}...")
             try:
-                results, stats = await loop.run_in_executor(
+                results, report = await loop.run_in_executor(
                     self._scan_executor, self._scan_source, source_key, search, loop
                 )
             except ScanInterruptedError as error:
                 logger.exception("Scan stopped after partial success: source=%s", source_key)
                 all_results.extend(error.offers)
                 summaries.append(
-                    f"{_source_name(source_key)}: przerwane, zapisano {error.stats.inserted}"
+                    f"{_source_name(source_key)}: przerwane, zapisano {len(error.offers)}"
                 )
             except Exception as error:
                 # One failing source must not abort the remaining ones.
@@ -354,9 +303,7 @@ class ScanView:
                 errors.append(f"{_source_name(source_key)}: {error}")
             else:
                 all_results.extend(results)
-                summaries.append(
-                    f"{_source_name(source_key)}: zapisano {stats.inserted}/{stats.seen}"
-                )
+                summaries.append(_format_source_summary(_source_name(source_key), report))
 
         return all_results, summaries, errors
 
@@ -413,50 +360,30 @@ class ScanView:
             await self._offers_view.enqueue_evaluations(newly_inserted_ids)
 
 
-def _create_source(
-    source_key: str,
-    *,
-    stop_event: threading.Event,
-    duplicate_checker: DuplicateChecker | None = None,
-    enriched_offer_handler: EnrichedOfferHandler | None = None,
-    progress_handler: ProgressHandler | None = None,
-) -> JobSource:
+def _create_source(source_key: str, hooks: ScanHooks) -> JobSource:
     if source_key == "pracuj":
-        return PracujJobSource(
-            stop_event=stop_event,
-            duplicate_checker=duplicate_checker,
-            enriched_offer_handler=enriched_offer_handler,
-            progress_handler=progress_handler,
-        )
+        return PracujJobSource(hooks)
     if source_key == "olx":
-        return OlxJobSource(
-            stop_event=stop_event,
-            duplicate_checker=duplicate_checker,
-            enriched_offer_handler=enriched_offer_handler,
-            progress_handler=progress_handler,
-        )
+        return OlxJobSource(hooks)
     if source_key == "theprotocol":
-        return TheProtocolJobSource(
-            stop_event=stop_event,
-            duplicate_checker=duplicate_checker,
-            enriched_offer_handler=enriched_offer_handler,
-            progress_handler=progress_handler,
-        )
+        return TheProtocolJobSource(hooks)
     if source_key == "nofluffjobs":
-        return NoFluffJobsSource(
-            stop_event=stop_event,
-            duplicate_checker=duplicate_checker,
-            enriched_offer_handler=enriched_offer_handler,
-            progress_handler=progress_handler,
-        )
+        return NoFluffJobsSource(hooks)
     if source_key == "bulldogjob":
-        return BulldogjobSource(
-            stop_event=stop_event,
-            duplicate_checker=duplicate_checker,
-            enriched_offer_handler=enriched_offer_handler,
-            progress_handler=progress_handler,
-        )
+        return BulldogjobSource(hooks)
     raise ValueError(f"Unsupported source: {source_key}")
+
+
+def _format_source_summary(source_name: str, report: ScanReport) -> str:
+    details = [
+        f"{label}: {count}"
+        for label, count in (("znane", report.known), ("nieudane", report.failed))
+        if count
+    ]
+    if report.truncated:
+        details.append(f"niepełny — limit {report.pages} stron")
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"{source_name}: zapisano {report.saved}{suffix}"
 
 
 def _source_name(source_key: str) -> str:
