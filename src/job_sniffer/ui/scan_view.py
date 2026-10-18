@@ -1,36 +1,27 @@
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import flet as ft
 from sqlalchemy.exc import SQLAlchemyError
 
 from job_sniffer.config import AppConfig
-from job_sniffer.database import (
-    ProfileRecord,
-    ProfileSourceConfig,
-    db_session,
-    get_profile,
-    get_profile_source_settings,
-    list_profiles,
-    offer_exists,
-    save_offer,
-    source_enabled,
+from job_sniffer.database import DB_PATH, ProfileRecord, db_session, list_profiles, source_enabled
+from job_sniffer.models import JobOffer
+from job_sniffer.scanning import (
+    ScanCallbacks,
+    ScanPlan,
+    format_scan_message,
+    load_scan_plan,
+    run_scan,
 )
-from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.services import EvaluationService
-from job_sniffer.sources.base import (
-    JobSource,
-    ProgressHandler,
-    ScanHooks,
-    ScanProgress,
-    ScanReport,
-)
-from job_sniffer.sources.registry import ACTIVE_SOURCES, get_source_definition
+from job_sniffer.sources.base import ScanProgress
+from job_sniffer.sources.registry import ACTIVE_SOURCES, SourceDefinition
 from job_sniffer.ui.offers_view import OffersView
 from job_sniffer.ui.status_bar import StatusBar
 
@@ -38,22 +29,6 @@ logger = logging.getLogger(__name__)
 
 ALL_SOURCES_KEY = "__all__"
 _MAX_LOG_LINES = 500
-
-
-class ScanInterruptedError(RuntimeError):
-    """Report a failed scan together with offers already saved during it."""
-
-    def __init__(self, cause: Exception, offers: list[tuple[JobOffer, int]]) -> None:
-        super().__init__(str(cause))
-        self.offers = offers
-
-
-@dataclass(frozen=True)
-class ScanPlan:
-    """Resolved inputs for a scan run."""
-
-    profile: ProfileRecord
-    settings: dict[str, ProfileSourceConfig]
 
 
 class ScanView:
@@ -69,6 +44,9 @@ class ScanView:
         offers_view: OffersView,
         status_bar: StatusBar,
         on_scan_finished: Callable[[], None],
+        *,
+        sources: Sequence[SourceDefinition] = ACTIVE_SOURCES,
+        db_path: Path = DB_PATH,
     ) -> None:
         self._page = page
         self._config = config
@@ -78,6 +56,8 @@ class ScanView:
         self._offers_view = offers_view
         self._status_bar = status_bar
         self._on_scan_finished = on_scan_finished
+        self._sources = tuple(sources)
+        self._db_path = db_path
 
         self._profiles: list[ProfileRecord] = []
 
@@ -87,7 +67,7 @@ class ScanView:
             value=ALL_SOURCES_KEY,
             options=[
                 ft.dropdown.Option(key=ALL_SOURCES_KEY, text="Wszystkie (włączone w profilu)"),
-                *[ft.dropdown.Option(key=item.key, text=item.name) for item in ACTIVE_SOURCES],
+                *[ft.dropdown.Option(key=item.key, text=item.name) for item in self._sources],
             ],
         )
 
@@ -129,7 +109,7 @@ class ScanView:
     def reload_profiles(self, *, update: bool = True) -> None:
         """Refresh the profile dropdown after profiles change."""
         try:
-            with db_session() as session:
+            with db_session(self._db_path) as session:
                 self._profiles = list_profiles(session)
         except SQLAlchemyError as error:
             logger.exception("Could not load profiles")
@@ -154,165 +134,81 @@ class ScanView:
         if update:
             self._page.update()
 
-    def _make_progress_handler(self, loop: asyncio.AbstractEventLoop) -> ProgressHandler:
-        def handle_progress(progress: ScanProgress) -> None:
-            def apply() -> None:
-                if progress.stage == "listing":
-                    self._progress_bar.value = None
-                else:
-                    total = progress.total or 0
-                    self._progress_bar.value = progress.current / total if total else 0.0
-                self._page.update()
+    def _make_callbacks(self, loop: asyncio.AbstractEventLoop) -> ScanCallbacks:
+        """Callbacks run on the scan worker thread, so each one hands its UI work to the loop."""
 
-            loop.call_soon_threadsafe(apply)
+        def on_source_started(source: SourceDefinition) -> None:
+            loop.call_soon_threadsafe(self._status_bar.set_scan, f"Skanowanie {source.name}...")
 
-        return handle_progress
-
-    def _append_log_line(self, loop: asyncio.AbstractEventLoop, text: str) -> None:
-        def apply() -> None:
-            self._log_column.controls.append(ft.Text(text, size=12))
-            while len(self._log_column.controls) > _MAX_LOG_LINES:
-                self._log_column.controls.pop(0)
-            self._page.update()
-
-        loop.call_soon_threadsafe(apply)
-
-    def _scan_source(
-        self, source_key: str, search: JobSearch, loop: asyncio.AbstractEventLoop
-    ) -> tuple[list[tuple[JobOffer, int]], ScanReport]:
-        logger.info("Fetching offers: source=%s", source_key)
-        source_name = _source_name(source_key)
-        saved_results: list[tuple[JobOffer, int]] = []
-        with db_session() as session:
-
-            def save_enriched_offer(offer: JobOffer) -> bool:
-                inserted_id = save_offer(session, offer)
-                if inserted_id is None:
-                    logger.info(
-                        "Skipped duplicate after enrich: %s - %s", offer.title, offer.company
-                    )
-                    return False
-                logger.info(
-                    "Saved enriched offer immediately: %s - %s (id=%s)",
-                    offer.title,
-                    offer.company,
-                    inserted_id,
-                )
-                saved_results.append((offer, inserted_id))
-                self._append_log_line(loop, f"{offer.title} — {offer.company} — {source_name}")
-                return True
-
-            hooks = ScanHooks(
-                stop_event=self._stop_event,
-                duplicate_checker=lambda offer: offer_exists(session, offer),
-                enriched_offer_handler=save_enriched_offer,
-                progress_handler=self._make_progress_handler(loop),
+        def on_offer_saved(source: SourceDefinition, offer: JobOffer) -> None:
+            loop.call_soon_threadsafe(
+                self._append_log_line, f"{offer.title} — {offer.company} — {source.name}"
             )
-            try:
-                hooks.raise_if_stopped()
-                report = _create_source(source_key, hooks).search(search)
-            except Exception as error:
-                if not saved_results:
-                    raise
-                raise ScanInterruptedError(error, saved_results) from error
 
-        logger.info("Saved %s enriched offers from %s", len(saved_results), source_key)
-        return saved_results, report
+        def on_progress(progress: ScanProgress) -> None:
+            loop.call_soon_threadsafe(self._show_progress, progress)
 
-    def _load_profile_for_scan(self, profile_value: str) -> ScanPlan | None:
-        """Load the selected profile with its source settings; None reports the problem."""
+        return ScanCallbacks(
+            on_source_started=on_source_started,
+            on_offer_saved=on_offer_saved,
+            on_progress=on_progress,
+        )
+
+    def _show_progress(self, progress: ScanProgress) -> None:
+        if progress.stage == "listing" or not progress.total:
+            self._progress_bar.value = None
+        else:
+            self._progress_bar.value = progress.current / progress.total
+        self._page.update()
+
+    def _append_log_line(self, text: str) -> None:
+        self._log_column.controls.append(ft.Text(text, size=12))
+        while len(self._log_column.controls) > _MAX_LOG_LINES:
+            self._log_column.controls.pop(0)
+        self._page.update()
+
+    def _load_plan(self) -> ScanPlan | None:
+        """Load the selected profile; None means the problem is already shown."""
         try:
-            profile_id = int(profile_value)
+            profile_id = int(self._profile_dropdown.value or "")
         except ValueError:
             self._status_bar.set_scan("Wybierz profil skanowania.")
             return None
-
-        profile: ProfileRecord | None
-        settings: dict[str, ProfileSourceConfig]
         try:
-            with db_session() as session:
-                profile = get_profile(session, profile_id)
-                settings = (
-                    get_profile_source_settings(session, profile_id) if profile is not None else {}
-                )
+            plan = load_scan_plan(profile_id, self._db_path)
         except SQLAlchemyError as error:
             logger.exception("Could not load profile %s", profile_id)
             self._status_bar.set_scan(f"Błąd bazy danych: {error}")
             return None
-
-        if profile is None:
+        if plan is None:
             self._status_bar.set_scan("Profil nie istnieje.")
             self.reload_profiles()
-            return None
-        return ScanPlan(profile=profile, settings=settings)
+        return plan
 
-    def _select_source_keys(self, plan: ScanPlan) -> list[str] | None:
+    def _select_sources(self, plan: ScanPlan) -> list[SourceDefinition] | None:
         """Resolve which sources to scan; None means the scan cannot start."""
-        source_value = self._source_dropdown.value or ALL_SOURCES_KEY
-        if source_value != ALL_SOURCES_KEY:
-            if not source_enabled(plan.settings, source_value):
-                self._status_bar.set_scan(
-                    f"Źródło {_source_name(source_value)} jest wyłączone w profilu "
-                    f"„{plan.profile.name}”."
-                )
-                return None
-            return [source_value]
-        source_keys = [
-            source.key for source in ACTIVE_SOURCES if source_enabled(plan.settings, source.key)
+        selected = self._source_dropdown.value or ALL_SOURCES_KEY
+        candidates = [
+            source for source in self._sources if selected in (ALL_SOURCES_KEY, source.key)
         ]
-        if not source_keys:
+        sources = [source for source in candidates if source_enabled(plan.settings, source.key)]
+        if sources:
+            return sources
+        if selected == ALL_SOURCES_KEY:
             self._status_bar.set_scan("Profil nie ma włączonych źródeł.")
-            return None
-        return source_keys
-
-    async def _run_source_scans(
-        self, plan: ScanPlan, source_keys: list[str], loop: asyncio.AbstractEventLoop
-    ) -> tuple[list[tuple[JobOffer, int]], list[str], list[str]]:
-        """Scan every selected source sequentially, collecting offers and result lines."""
-        all_results: list[tuple[JobOffer, int]] = []
-        summaries: list[str] = []
-        errors: list[str] = []
-
-        for source_key in source_keys:
-            if self._stop_event.is_set():
-                break
-            stored = plan.settings.get(source_key)
-            search = JobSearch(
-                filters=stored.filters if stored else {},
-                limit=plan.profile.offer_limit,
+        else:
+            self._status_bar.set_scan(
+                f"Źródło {candidates[0].name} jest wyłączone w profilu „{plan.profile.name}”."
             )
-            self._status_bar.set_scan(f"Skanowanie {_source_name(source_key)}...")
-            try:
-                results, report = await loop.run_in_executor(
-                    self._scan_executor, self._scan_source, source_key, search, loop
-                )
-            except ScanInterruptedError as error:
-                logger.exception("Scan stopped after partial success: source=%s", source_key)
-                all_results.extend(error.offers)
-                summaries.append(
-                    f"{_source_name(source_key)}: przerwane, zapisano {len(error.offers)}"
-                )
-            except Exception as error:
-                # One failing source must not abort the remaining ones.
-                logger.exception("Scan failed: source=%s", source_key)
-                errors.append(f"{_source_name(source_key)}: {error}")
-            else:
-                all_results.extend(results)
-                summaries.append(_format_source_summary(_source_name(source_key), report))
-
-        return all_results, summaries, errors
+        return None
 
     async def _on_scan_click(self, _: Any) -> None:
         logger.info("Scan initiated")
-        profile_value = self._profile_dropdown.value
-        if not profile_value:
-            self._status_bar.set_scan("Wybierz profil skanowania.")
-            return
-        plan = self._load_profile_for_scan(profile_value)
+        plan = self._load_plan()
         if plan is None:
             return
-        source_keys = self._select_source_keys(plan)
-        if source_keys is None:
+        sources = self._select_sources(plan)
+        if sources is None:
             return
 
         loop = asyncio.get_running_loop()
@@ -324,24 +220,26 @@ class ScanView:
 
         completed = False
         try:
-            all_results, summaries, errors = await self._run_source_scans(plan, source_keys, loop)
-
+            outcomes = await loop.run_in_executor(
+                self._scan_executor,
+                lambda: run_scan(
+                    plan,
+                    sources,
+                    stop_event=self._stop_event,
+                    callbacks=self._make_callbacks(loop),
+                    db_path=self._db_path,
+                ),
+            )
+            saved = [offer for outcome in outcomes for offer in outcome.saved]
             can_eval = (
-                bool(all_results)
+                bool(saved)
                 and self._config.auto_evaluate
                 and bool(self._evaluation_service.get_cv_text())
             )
-            if all_results:
-                self._offers_view.add_new_offers(all_results, pending_evaluation=can_eval)
-                if self._on_scan_finished is not None:
-                    self._on_scan_finished()
-
-            message = "Skanowanie profilu zakończone."
-            if summaries:
-                message += " " + "; ".join(summaries) + "."
-            if errors:
-                message += " Błędy: " + "; ".join(errors) + "."
-            self._status_bar.set_scan(message)
+            if saved:
+                self._offers_view.add_new_offers(saved, pending_evaluation=can_eval)
+                self._on_scan_finished()
+            self._status_bar.set_scan(format_scan_message(outcomes))
             completed = True
         finally:
             # Re-enable scanning even after an unexpected error so the user is never blocked.
@@ -350,29 +248,6 @@ class ScanView:
             self._page.update()
 
         if can_eval:
-            newly_inserted_ids = [inserted_id for _, inserted_id in reversed(all_results)]
+            newly_inserted_ids = [inserted_id for _, inserted_id in reversed(saved)]
             logger.info("Enqueuing %s offers for background AI evaluation", len(newly_inserted_ids))
             await self._offers_view.enqueue_evaluations(newly_inserted_ids)
-
-
-def _create_source(source_key: str, hooks: ScanHooks) -> JobSource:
-    create = get_source_definition(source_key).create
-    if create is None:
-        raise ValueError(f"Source {source_key} cannot be scanned")
-    return create(hooks)
-
-
-def _format_source_summary(source_name: str, report: ScanReport) -> str:
-    details = [
-        f"{label}: {count}"
-        for label, count in (("znane", report.known), ("nieudane", report.failed))
-        if count
-    ]
-    if report.truncated:
-        details.append(f"niepełny — limit {report.pages} stron")
-    suffix = f" ({', '.join(details)})" if details else ""
-    return f"{source_name}: zapisano {report.saved}{suffix}"
-
-
-def _source_name(source_key: str) -> str:
-    return get_source_definition(source_key).name
