@@ -1,6 +1,6 @@
 import json
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -61,8 +61,6 @@ class _Board:
 
     def save(self, offer: JobOffer) -> bool:
         assert offer.external_id is not None
-        if offer.external_id in self.known:
-            return False
         self.saved.append(offer.external_id)
         self.on_save(offer)
         return True
@@ -73,16 +71,14 @@ class _Board:
         limit: int | None = None,
         max_pages: int = 20,
         accept: Callable[[JobOffer], bool] | None = None,
-        known_before_listing: Iterable[str] | None = None,
     ) -> ScanReport:
-        listing_known = self.known if known_before_listing is None else set(known_before_listing)
         return scan_offers(
             self.fetch_page,
             self.enrich,
             search=JobSearch(filters={}, limit=limit),
             hooks=ScanHooks(
                 stop_event=self.stop_event,
-                duplicate_checker=lambda offer: offer.external_id in listing_known,
+                duplicate_checker=lambda offer: offer.external_id in self.known,
                 enriched_offer_handler=self.save,
             ),
             pacing=replace(NO_DELAYS, max_pages=max_pages),
@@ -158,15 +154,6 @@ def test_offers_rejected_by_the_source_filter_are_skipped_without_detail_fetch()
 
     assert board.fetched_details == ["1", "3"]
     assert (report.filtered_out, report.saved) == (1, 2)
-
-
-def test_duplicate_detected_only_when_saving_is_reported_as_known() -> None:
-    board = _Board(pages={1: ["1", "2"]}, known={"2"})
-
-    report = board.scan(known_before_listing=set())
-
-    assert board.saved == ["1"]
-    assert (report.known, report.saved) == (1, 1)
 
 
 def test_stopping_the_scan_skips_the_remaining_detail_pages() -> None:

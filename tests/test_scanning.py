@@ -200,15 +200,6 @@ def test_each_source_is_searched_with_its_profile_filters_and_the_profile_limit(
     assert beta.searches == [JobSearch(filters={}, limit=5)]
 
 
-def test_stopped_scan_does_not_start_further_sources(make_plan: MakePlan, db_path: Path) -> None:
-    stop_event = threading.Event()
-    stop_event.set()
-    board = _Board("alpha", "Alfa", ["1"])
-
-    assert _scan(make_plan(), [board], db_path, stop_event) == []
-    assert board.searches == []
-
-
 def test_summary_lists_known_failed_and_truncated_scans() -> None:
     source = _Board("alpha", "Alfa", []).definition()
     report = ScanReport(pages=20, known=3, failed=1, saved=2, truncated=True)

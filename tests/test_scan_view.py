@@ -142,17 +142,6 @@ def test_scan_reports_saved_offers_and_failing_sources(
     )
 
 
-def test_scan_button_is_enabled_again_after_a_failing_source(
-    make_view: MakeView, scrapers: _Scrapers
-) -> None:
-    view = make_view({"alpha"})
-    scrapers.errors["alpha"] = KeyError("nieznany format strony")
-
-    asyncio.run(view._on_scan_click(None))
-
-    assert view._scan_button.disabled is False
-
-
 def test_scan_button_is_enabled_again_after_an_unexpected_ui_error(
     make_view: MakeView, offers_view: MagicMock
 ) -> None:

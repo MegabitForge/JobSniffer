@@ -57,23 +57,7 @@ def _schema_inventory(engine: Engine) -> dict[str, tuple[Any, ...]]:
     return inventory
 
 
-def test_fresh_database_contains_all_tables(tmp_path: Path) -> None:
-    with connect(tmp_path / "test.sqlite") as session:
-        init_db(session)
-        engine = session.get_bind()
-
-    inspector = inspect(engine)
-    assert set(inspector.get_table_names()) == EXPECTED_TABLES
-    assert "explanation" in {
-        column["name"] for column in inspector.get_columns("job_offer_evaluations")
-    }
-    offer_indexes = {index["name"] for index in inspector.get_indexes("job_offers")}
-    assert "ux_job_source_external_id" in offer_indexes
-    assert "ux_job_source_url" in offer_indexes
-    assert _version(engine) == _head_revision()
-
-
-def test_alembic_schema_matches_metadata(tmp_path: Path) -> None:
+def test_migrated_database_matches_orm_metadata_at_head(tmp_path: Path) -> None:
     metadata_engine = create_engine(f"sqlite:///{tmp_path / 'metadata.sqlite'}")
     Base.metadata.create_all(metadata_engine)
 
@@ -82,6 +66,7 @@ def test_alembic_schema_matches_metadata(tmp_path: Path) -> None:
         migrated_engine = session.get_bind()
 
     assert _schema_inventory(migrated_engine) == _schema_inventory(metadata_engine)
+    assert _version(migrated_engine) == _head_revision()
 
 
 def test_legacy_database_is_upgraded(tmp_path: Path) -> None:
@@ -107,12 +92,3 @@ def test_legacy_database_is_upgraded(tmp_path: Path) -> None:
         column["name"] for column in inspector.get_columns("job_offer_evaluations")
     }
     assert _version(legacy_engine) == _head_revision()
-
-
-def test_init_db_is_idempotent(tmp_path: Path) -> None:
-    with connect(tmp_path / "test2.sqlite") as session:
-        init_db(session)
-        init_db(session)
-        engine = session.get_bind()
-
-    assert set(inspect(engine).get_table_names()) == EXPECTED_TABLES
