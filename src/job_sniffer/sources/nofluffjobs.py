@@ -1,9 +1,7 @@
 import html
 import json
 import logging
-import random
 import re
-import threading
 import unicodedata
 from dataclasses import replace
 from typing import Any
@@ -16,17 +14,18 @@ from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.sources._common import DEFAULT_USER_AGENT, is_poland_location
 from job_sniffer.sources._text import clean_text, format_bullet_sections, join_unique
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
-    dedupe_listing_offers,
-    filter_new_offers,
-    limit_offers,
-    offer_listing_key,
-    process_enriched_offers,
-    wait_before_next_page,
+    DEFAULT_PACING,
+    Pacing,
+    ScanHooks,
+    ScanReport,
+    scan_offers,
 )
+from job_sniffer.sources.filters import LOCATION_FILTER, SourceFilter
 
 logger = logging.getLogger(__name__)
+
+
+FILTERS: tuple[SourceFilter, ...] = (LOCATION_FILTER,)
 
 
 class NoFluffJobsSource:
@@ -34,91 +33,42 @@ class NoFluffJobsSource:
 
     def __init__(
         self,
+        hooks: ScanHooks | None = None,
         *,
+        pacing: Pacing = DEFAULT_PACING,
         timeout_seconds: float = 30.0,
-        detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        max_pages: int = 20,
-        stop_event: threading.Event | None = None,
-        duplicate_checker: DuplicateChecker | None = None,
-        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
+        self.hooks = hooks or ScanHooks()
+        self.pacing = pacing
         self.timeout_seconds = timeout_seconds
-        self.detail_delay_seconds = detail_delay_seconds
-        self.pagination_delay_seconds = pagination_delay_seconds
-        self.max_pages = max_pages
-        self.stop_event = stop_event
-        self.duplicate_checker = duplicate_checker
-        self.enriched_offer_handler = enriched_offer_handler
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
         logger.info(
-            "Starting NoFluffJobs search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
+            "Starting NoFluffJobs search: filters=%s limit=%s", search.filters, search.limit
         )
-        offers = self._collect_listing_pages(search)
-        new_offers = filter_new_offers(offers, self.duplicate_checker)
-        logger.info("NoFluffJobs returned %s offers, %s were new", len(offers), len(new_offers))
-        limited_offers = limit_offers(new_offers, search.limit)
-        return process_enriched_offers(
-            limited_offers,
+        return scan_offers(
+            lambda page: self._fetch_listing_page(search, page),
             self._enrich_offer_from_detail,
-            self.enriched_offer_handler,
+            search=search,
+            hooks=self.hooks,
+            pacing=self.pacing,
+            label="NoFluffJobs",
         )
 
-    def _collect_listing_pages(self, search: JobSearch) -> list[JobOffer]:
-        offers: list[JobOffer] = []
-        seen_keys: set[tuple[str, str]] = set()
-
-        for page in range(1, self.max_pages + 1):
-            self._raise_if_stopped()
-            self._wait_before_listing_page(page)
-            data = self._fetch_listing_data(search, page=page)
-            postings = data.get("postings", [])
-            if not isinstance(postings, list):
-                raise TypeError("NoFluffJobs API returned an unexpected postings payload")
-            page_offers = [
-                _map_posting(posting) for posting in postings if isinstance(posting, dict)
-            ]
-            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
-            logger.info(
-                "Parsed %s NoFluffJobs offers from listing page %s, %s were new in this scan",
-                len(page_offers),
-                page,
-                len(page_new),
-            )
-            if not page_offers or not page_new:
-                break
-            for offer in page_new:
-                seen_keys.add(offer_listing_key(offer))
-            offers.extend(page_new)
-            if search.limit is not None and len(offers) >= search.limit:
-                logger.info(
-                    "Reached requested limit of %s NoFluffJobs offers, stopping pagination",
-                    search.limit,
-                )
-                break
-        else:
-            logger.warning("Stopped NoFluffJobs pagination after max_pages=%s", self.max_pages)
-
-        return dedupe_listing_offers(offers)
-
-    def _wait_before_listing_page(self, page: int) -> None:
-        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
-        if delay is not None:
-            logger.info("Waited %.1fs before NoFluffJobs listing page %s", delay, page)
-        self._raise_if_stopped()
+    def _fetch_listing_page(self, search: JobSearch, page: int) -> list[JobOffer]:
+        postings = self._fetch_listing_data(search, page=page).get("postings", [])
+        if not isinstance(postings, list):
+            raise TypeError("NoFluffJobs API returned an unexpected postings payload")
+        return [_map_posting(posting) for posting in postings if isinstance(posting, dict)]
 
     def _fetch_listing_data(self, search: JobSearch, *, page: int) -> dict[str, Any]:
-        if is_poland_location(search.location):
+        if is_poland_location(search.text("location")):
             response = httpx.get(
                 "https://nofluffjobs.com/api/joboffers/main",
                 params={
                     "salaryCurrency": "PLN",
                     "salaryPeriod": "MONTH",
-                    "criteria": search.keywords,
+                    "criteria": "",
                     "page": page,
                 },
                 headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT},
@@ -145,12 +95,6 @@ class NoFluffJobsSource:
             logger.warning("Skipping NoFluffJobs offer without a detail URL: %s", offer.title)
             return None
 
-        delay = random.uniform(*self.detail_delay_seconds)
-        logger.info("Waiting %.1fs before NoFluffJobs detail fetch: %s", delay, offer.url)
-        if self.stop_event and self.stop_event.wait(delay):
-            self._raise_if_stopped()
-
-        self._raise_if_stopped()
         logger.info("Fetching NoFluffJobs detail page: %s", offer.url)
         try:
             response = httpx.get(
@@ -174,10 +118,6 @@ class NoFluffJobsSource:
             description_text=description_text,
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
-
-    def _raise_if_stopped(self) -> None:
-        if self.stop_event is not None and self.stop_event.is_set():
-            raise RuntimeError("NoFluffJobs scan cancelled because the application is closing.")
 
 
 def _map_posting(posting: dict[str, Any]) -> JobOffer:
@@ -204,13 +144,10 @@ def _map_posting(posting: dict[str, Any]) -> JobOffer:
 
 
 def build_search_url(search: JobSearch) -> str:
-    if is_poland_location(search.location):
+    location = search.text("location")
+    if is_poland_location(location):
         return "https://nofluffjobs.com/pl"
-    location = _slugify_location(search.location)
-    keyword = quote(search.keywords.strip())
-    if not keyword:
-        return f"https://nofluffjobs.com/pl/{location}"
-    return f"https://nofluffjobs.com/pl/{location}?criteria={keyword}"
+    return f"https://nofluffjobs.com/pl/{_slugify_location(location)}"
 
 
 def _with_page(url: str, page: int) -> str:

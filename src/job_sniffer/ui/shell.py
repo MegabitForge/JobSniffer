@@ -51,6 +51,7 @@ def build_shell(page: ft.Page) -> ft.Control:
         status_bar,
         on_scan_finished=show_offers_after_scan,
     )
+    profiles_view.on_profiles_changed = scan_view.reload_profiles
 
     views: dict[str, ft.Control] = {
         "scan": scan_view.control,
