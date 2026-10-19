@@ -34,7 +34,9 @@ class ScanPlan:
 
     def search_for(self, source_key: str) -> JobSearch:
         stored = self.settings.get(source_key)
-        return JobSearch(filters=stored.filters if stored else {}, limit=self.profile.offer_limit)
+        if stored is None:
+            return JobSearch(filters={})
+        return JobSearch(filters=stored.filters, limit=stored.offer_limit)
 
 
 def load_scan_plan(profile_id: int, db_path: Path = DB_PATH) -> ScanPlan | None:

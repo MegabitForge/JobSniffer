@@ -32,6 +32,12 @@ class _DbError(Exception):
     """Internal marker for a failed database operation."""
 
 
+class _InvalidLimitError(ValueError):
+    def __init__(self, source_name: str) -> None:
+        super().__init__(source_name)
+        self.source_name = source_name
+
+
 class ScanProfilesPanel:
     """Scan profile list and editor with per-source filters."""
 
@@ -43,8 +49,8 @@ class ScanProfilesPanel:
         self._source_switches: dict[str, ft.Switch] = {}
         self._source_text_fields: dict[str, dict[str, ft.TextField]] = {}
         self._source_chips: dict[str, dict[str, list[ft.Chip]]] = {}
+        self._source_limit_fields: dict[str, ft.TextField] = {}
         self._name_field: ft.TextField | None = None
-        self._limit_field: ft.TextField | None = None
 
         self._status_text = ft.Text("")
         self._profiles_container = ft.Container()
@@ -135,15 +141,10 @@ class ScanProfilesPanel:
         self, profile: ProfileRecord, settings: dict[str, ProfileSourceConfig]
     ) -> ft.Control:
         self._name_field = ft.TextField(label="Nazwa profilu", value=profile.name)
-        self._limit_field = ft.TextField(
-            label="Limit ofert",
-            value=str(profile.offer_limit) if profile.offer_limit is not None else "",
-            keyboard_type=ft.KeyboardType.NUMBER,
-            hint_text="Puste = brak limitu",
-        )
         self._source_switches = {}
         self._source_text_fields = {}
         self._source_chips = {}
+        self._source_limit_fields = {}
 
         return ft.Column(
             controls=[
@@ -153,7 +154,6 @@ class ScanProfilesPanel:
                     on_click=self._on_back_click,
                 ),
                 self._name_field,
-                self._limit_field,
                 ft.Text("Źródła i filtry", size=16, weight=ft.FontWeight.BOLD),
                 *[
                     self._build_source_card(source_def, settings.get(source_def.key))
@@ -176,10 +176,21 @@ class ScanProfilesPanel:
         self._source_text_fields[source_def.key] = {}
         self._source_chips[source_def.key] = {}
 
+        limit_field = ft.TextField(
+            label="Limit nowych ofert",
+            value=str(stored.offer_limit) if stored and stored.offer_limit is not None else "",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            hint_text="Puste = brak limitu",
+        )
+        self._source_limit_fields[source_def.key] = limit_field
+
         schema = source_def.filters
         filter_controls: list[ft.Control] = [
-            self._build_filter_control(source_def.key, source_filter, stored)
-            for source_filter in schema
+            limit_field,
+            *[
+                self._build_filter_control(source_def.key, source_filter, stored)
+                for source_filter in schema
+            ],
         ]
 
         return ft.Card(
@@ -340,20 +351,21 @@ class ScanProfilesPanel:
     def _on_save_click(self, _: Any) -> None:
         profile_id = self._selected_profile_id
         name_field = self._name_field
-        limit_field = self._limit_field
-        if profile_id is None or name_field is None or limit_field is None:
+        if profile_id is None or name_field is None:
             return
         name = name_field.value or ""
         try:
-            offer_limit = parse_offer_limit(limit_field.value or "")
-        except ValueError:
-            self._set_status("Limit ofert musi być dodatnią liczbą całkowitą", error=True)
+            settings = self._collect_source_settings()
+        except _InvalidLimitError as error:
+            self._set_status(
+                f"Limit ofert dla {error.source_name} musi być dodatnią liczbą całkowitą",
+                error=True,
+            )
             self._page.update()
             return
-        settings = self._collect_source_settings()
         try:
             with self._session() as session:
-                updated = update_profile(session, profile_id, name, offer_limit, settings)
+                updated = update_profile(session, profile_id, name, settings)
                 if not updated:
                     if name.strip():
                         self._set_status("Profil o tej nazwie już istnieje", error=True)
@@ -373,8 +385,13 @@ class ScanProfilesPanel:
         for source_def in ACTIVE_SOURCES:
             source_key = source_def.key
             switch = self._source_switches.get(source_key)
-            if switch is None:
+            limit_field = self._source_limit_fields.get(source_key)
+            if switch is None or limit_field is None:
                 continue
+            try:
+                offer_limit = parse_offer_limit(limit_field.value or "")
+            except ValueError as error:
+                raise _InvalidLimitError(source_def.name) from error
             filters: dict[str, str | list[str]] = {}
             for source_filter in source_def.filters:
                 if source_filter.is_text:
@@ -394,6 +411,7 @@ class ScanProfilesPanel:
                     source_key=source_key,
                     enabled=bool(switch.value),
                     filters=filters,
+                    offer_limit=offer_limit,
                 )
             )
         return configs
@@ -419,9 +437,9 @@ def parse_offer_limit(raw: str) -> int | None:
 
 
 def _filters_summary(stored: ProfileSourceConfig | None, schema: tuple[SourceFilter, ...]) -> str:
-    if stored is None or not stored.filters:
+    if stored is None:
         return "Brak filtrów"
-    parts: list[str] = []
+    parts = [f"Limit: {stored.offer_limit}"] if stored.offer_limit is not None else []
     for source_filter in schema:
         value = stored.filters.get(source_filter.key)
         if value is None:

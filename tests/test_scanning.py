@@ -12,7 +12,7 @@ from job_sniffer.database import (
     list_offers_with_evaluations,
     save_profile_source_settings,
 )
-from job_sniffer.models import FilterValue, JobOffer, JobSearch
+from job_sniffer.models import JobOffer, JobSearch
 from job_sniffer.scanning import (
     ScanCallbacks,
     ScanPlan,
@@ -102,21 +102,12 @@ def db_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def make_plan(db_path: Path) -> MakePlan:
-    def make(
-        offer_limit: int | None = None, filters: dict[str, dict[str, FilterValue]] | None = None
-    ) -> ScanPlan:
+    def make(*source_settings: ProfileSourceConfig) -> ScanPlan:
         with db_session(db_path) as session:
-            profile = create_profile(session, "Backend", offer_limit=offer_limit)
+            profile = create_profile(session, "Backend")
             assert profile is not None
             profile_id = profile.id
-            save_profile_source_settings(
-                session,
-                profile_id,
-                [
-                    ProfileSourceConfig(source_key=key, enabled=True, filters=source_filters)
-                    for key, source_filters in (filters or {}).items()
-                ],
-            )
+            save_profile_source_settings(session, profile_id, source_settings)
         plan = load_scan_plan(profile_id, db_path)
         assert plan is not None
         return plan
@@ -187,17 +178,22 @@ def test_rescanning_skips_offers_already_stored(make_plan: MakePlan, db_path: Pa
     assert outcome.summary() == "Alfa: zapisano 1 (znane: 2)"
 
 
-def test_each_source_is_searched_with_its_profile_filters_and_the_profile_limit(
+def test_each_source_is_searched_with_its_own_filters_and_limit(
     make_plan: MakePlan, db_path: Path
 ) -> None:
     alpha = _Board("alpha", "Alfa", [])
     beta = _Board("beta", "Beta", [])
-    plan = make_plan(offer_limit=5, filters={"alpha": {"location": "Wrocław"}})
+    gamma = _Board("gamma", "Gamma", [])
+    plan = make_plan(
+        ProfileSourceConfig("alpha", enabled=True, filters={"location": "Wrocław"}, offer_limit=5),
+        ProfileSourceConfig("beta", enabled=True, filters={}),
+    )
 
-    _scan(plan, [alpha, beta], db_path)
+    _scan(plan, [alpha, beta, gamma], db_path)
 
     assert alpha.searches == [JobSearch(filters={"location": "Wrocław"}, limit=5)]
-    assert beta.searches == [JobSearch(filters={}, limit=5)]
+    assert beta.searches == [JobSearch(filters={})]
+    assert gamma.searches == [JobSearch(filters={})]
 
 
 def test_summary_lists_known_failed_and_truncated_scans() -> None:
