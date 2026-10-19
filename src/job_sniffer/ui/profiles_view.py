@@ -38,7 +38,7 @@ class ProfilesView:
             color=ft.Colors.GREEN_700 if config.cv_path else ft.Colors.ORANGE_800,
         )
 
-        pick_cv_button = ft.ElevatedButton(
+        pick_cv_button = ft.Button(
             "Wybierz plik CV (.pdf, .txt, .md)",
             icon=ft.Icons.ATTACH_FILE,
             on_click=self._on_pick_cv_click,

@@ -71,7 +71,7 @@ class ScanView:
             ],
         )
 
-        self._scan_button = ft.ElevatedButton("Skanuj oferty", icon=ft.Icons.SEARCH)
+        self._scan_button = ft.Button("Skanuj oferty", icon=ft.Icons.SEARCH)
         self._scan_button.on_click = self._on_scan_click
 
         self._progress_bar = ft.ProgressBar(value=0.0)

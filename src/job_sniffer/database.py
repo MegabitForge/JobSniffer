@@ -110,7 +110,6 @@ class ProfileRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    offer_limit: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
 
     source_settings: Mapped[list[ProfileSourceSettingRecord]] = relationship(
@@ -131,6 +130,7 @@ class ProfileSourceSettingRecord(Base):
     source_key: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     filters: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    offer_limit: Mapped[int | None] = mapped_column(Integer)
 
     profile: Mapped[ProfileRecord] = relationship(back_populates="source_settings")
 
@@ -150,6 +150,7 @@ class ProfileSourceConfig:
     source_key: str
     enabled: bool
     filters: dict[str, str | list[str]]
+    offer_limit: int | None = None
 
 
 def connect(path: Path) -> Session:
@@ -226,14 +227,12 @@ def list_profiles(session: Session) -> list[ProfileRecord]:
     return list(session.scalars(select(ProfileRecord).order_by(ProfileRecord.name.asc())).all())
 
 
-def create_profile(
-    session: Session, name: str, offer_limit: int | None = None
-) -> ProfileRecord | None:
+def create_profile(session: Session, name: str) -> ProfileRecord | None:
     """Create a profile; return None for an empty or duplicate name."""
     stripped = name.strip()
     if not stripped:
         return None
-    record = ProfileRecord(name=stripped, offer_limit=offer_limit)
+    record = ProfileRecord(name=stripped)
     session.add(record)
     try:
         session.commit()
@@ -247,10 +246,9 @@ def update_profile(
     session: Session,
     profile_id: int,
     name: str,
-    offer_limit: int | None,
     source_settings: Sequence[ProfileSourceConfig] = (),
 ) -> bool:
-    """Update profile fields and source settings in one commit; return False when not possible."""
+    """Rename a profile and save its source settings in one commit; False when not possible."""
     record = session.get(ProfileRecord, profile_id)
     if record is None:
         return False
@@ -258,7 +256,6 @@ def update_profile(
     if not stripped:
         return False
     record.name = stripped
-    record.offer_limit = offer_limit
     try:
         # Inside the try: the settings query autoflushes the rename, which may hit the unique name.
         _upsert_source_settings(session, profile_id, source_settings)
@@ -298,6 +295,7 @@ def get_profile_source_settings(
             source_key=record.source_key,
             enabled=record.enabled,
             filters=dict(record.filters or {}),
+            offer_limit=record.offer_limit,
         )
         for record in records
     }
@@ -331,11 +329,13 @@ def _upsert_source_settings(
                     source_key=setting.source_key,
                     enabled=setting.enabled,
                     filters=setting.filters,
+                    offer_limit=setting.offer_limit,
                 )
             )
         else:
             record.enabled = setting.enabled
             record.filters = setting.filters
+            record.offer_limit = setting.offer_limit
 
 
 def save_offer(session: Session, offer: JobOffer) -> int | None:

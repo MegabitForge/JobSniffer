@@ -89,7 +89,7 @@ class LlmView:
             value=config.models_dir,
             expand=True,
         )
-        pick_dir_button = ft.ElevatedButton(
+        pick_dir_button = ft.Button(
             "Zmień folder",
             icon=ft.Icons.FOLDER_OPEN,
             on_click=self._on_pick_models_dir,
@@ -104,7 +104,7 @@ class LlmView:
 
         self._download_progress = ft.ProgressBar(value=0.0, visible=False)
         self._progress_status_text = ft.Text("", size=13)
-        self._download_button = ft.ElevatedButton(
+        self._download_button = ft.Button(
             "Pobierz i uruchom model",
             icon=ft.Icons.DOWNLOAD,
         )

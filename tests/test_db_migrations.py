@@ -92,3 +92,37 @@ def test_legacy_database_is_upgraded(tmp_path: Path) -> None:
         column["name"] for column in inspector.get_columns("job_offer_evaluations")
     }
     assert _version(legacy_engine) == _head_revision()
+
+
+def test_profile_offer_limit_moves_to_each_of_its_sources(tmp_path: Path) -> None:
+    db_path = tmp_path / "profiles.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(db._ALEMBIC_DIR))
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0002")
+        connection.execute(
+            text(
+                "INSERT INTO profiles (id, name, offer_limit, created_at) "
+                "VALUES (1, 'Backend', 5, '2026-10-01'), (2, 'Frontend', NULL, '2026-10-01')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO profile_source_settings (profile_id, source_key, enabled, filters) "
+                "VALUES (1, 'olx', 1, '{}'), (1, 'pracuj', 0, '{}'), (2, 'olx', 1, '{}')"
+            )
+        )
+
+    with connect(db_path) as session:
+        init_db(session)
+
+    with engine.connect() as connection:
+        limits = connection.execute(
+            text(
+                "SELECT profile_id, source_key, offer_limit FROM profile_source_settings "
+                "ORDER BY profile_id, source_key"
+            )
+        ).all()
+    assert [tuple(row) for row in limits] == [(1, "olx", 5), (1, "pracuj", 5), (2, "olx", None)]
