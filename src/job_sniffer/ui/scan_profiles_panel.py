@@ -148,7 +148,7 @@ class ScanProfilesPanel:
         return ft.Column(
             controls=[
                 ft.OutlinedButton(
-                    "← Wróć do listy profili",
+                    "Wróć do listy profili",
                     icon=ft.Icons.ARROW_BACK,
                     on_click=self._on_back_click,
                 ),
