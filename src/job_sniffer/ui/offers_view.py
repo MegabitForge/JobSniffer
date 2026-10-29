@@ -3,7 +3,6 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import flet as ft
@@ -11,12 +10,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from job_sniffer.config import AppConfig
 from job_sniffer.database import (
+    DB_PATH,
     connect,
+    db_session,
     delete_evaluation,
     delete_offer,
     get_evaluation,
     get_offer_by_id,
-    init_db,
     list_offers_with_evaluations,
     list_unevaluated_offers,
 )
@@ -26,7 +26,6 @@ from job_sniffer.ui.status_bar import StatusBar
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("job_sniffer.sqlite")
 PAGE_SIZE = 50
 
 
@@ -124,7 +123,7 @@ class OffersView:
     def _handle_delete_offer(self, offer_id: int) -> None:
         """Delete an offer from database and remove its card from the UI."""
         try:
-            with connect(DB_PATH) as session:
+            with db_session() as session:
                 deleted = delete_offer(session, offer_id)
         except (SQLAlchemyError, OSError) as del_err:
             logger.warning("Failed to delete offer %s: %s", offer_id, del_err)
@@ -144,7 +143,7 @@ class OffersView:
 
         rec = None
         try:
-            with connect(DB_PATH) as session:
+            with db_session() as session:
                 delete_evaluation(session, offer_id)
                 rec = get_offer_by_id(session, offer_id)
         except (SQLAlchemyError, OSError) as reset_err:
@@ -444,8 +443,7 @@ class OffersView:
 
     def _fetch_rows(self) -> list[OfferRow]:
         """Read all saved offers with evaluations as plain snapshots (newest first)."""
-        with connect(DB_PATH) as session:
-            init_db(session)
+        with db_session() as session:
             records = list_offers_with_evaluations(session, limit=None)
             return [
                 OfferRow(
@@ -551,6 +549,8 @@ class OffersView:
                 remaining = self._eval_queue.qsize() + 1
                 self._status_bar.set_ai(f"AI ocenia oferty w tle (pozostało: {remaining})...")
 
+                # Manual lifetime: the session spans the LLM call and the error handler below
+                # still reads offer_record, so it must not be rolled back/expired by db_session().
                 session = connect(DB_PATH)
                 offer_record = None
                 try:
@@ -642,7 +642,7 @@ class OffersView:
             self._status_bar.show_ai("Najpierw wybierz plik CV w zakładce 'Profiles'.")
             return
 
-        with connect(DB_PATH) as session:
+        with db_session() as session:
             unevaluated = list_unevaluated_offers(session, limit=None)
             pending_ids = [item.id for item in unevaluated]
 
@@ -663,7 +663,7 @@ class OffersView:
             self._failed_eval_ids.discard(pid)
             if pid in self._offer_cards_by_id:
                 card = self._offer_cards_by_id[pid]
-                with connect(DB_PATH) as session:
+                with db_session() as session:
                     rec = get_offer_by_id(session, pid)
                     if rec:
                         card.content = self._build_card_inner(

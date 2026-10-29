@@ -55,9 +55,9 @@ class LinkedInJobSource:
         scraper.on(Events.INVALID_SESSION, on_invalid_session)
 
         query = Query(
-            query=search.keywords,
+            query=search.text("keywords"),
             options=QueryOptions(
-                locations=[search.location],
+                locations=[search.text("location")],
                 limit=search.limit,
                 apply_link=True,
             ),

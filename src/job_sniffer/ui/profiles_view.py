@@ -1,13 +1,17 @@
+"""Candidate CV management plus scan profiles with per-source filters."""
+
+from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
 from job_sniffer.config import AppConfig, save_config
 from job_sniffer.services import EvaluationService
+from job_sniffer.ui.scan_profiles_panel import ScanProfilesPanel
 
 
 class ProfilesView:
-    """Candidate profile management (CV file selection)."""
+    """Candidate profile management: global CV plus scan profiles."""
 
     def __init__(
         self,
@@ -21,6 +25,8 @@ class ProfilesView:
         self._evaluation_service = evaluation_service
         self._file_picker = file_picker
 
+        self._profiles_panel = ScanProfilesPanel(page)
+
         self._cv_path_field = ft.TextField(
             label="Ścieżka do pliku CV",
             value=config.cv_path or "",
@@ -32,7 +38,7 @@ class ProfilesView:
             color=ft.Colors.GREEN_700 if config.cv_path else ft.Colors.ORANGE_800,
         )
 
-        pick_cv_button = ft.ElevatedButton(
+        pick_cv_button = ft.Button(
             "Wybierz plik CV (.pdf, .txt, .md)",
             icon=ft.Icons.ATTACH_FILE,
             on_click=self._on_pick_cv_click,
@@ -57,11 +63,21 @@ class ProfilesView:
                         padding=16,
                     )
                 ),
+                self._profiles_panel.control,
             ],
             spacing=16,
             scroll=ft.ScrollMode.ADAPTIVE,
             expand=True,
         )
+
+    @property
+    def on_profiles_changed(self) -> Callable[[], None] | None:
+        """Callback invoked after scan profiles change; owned by the profiles panel."""
+        return self._profiles_panel.on_profiles_changed
+
+    @on_profiles_changed.setter
+    def on_profiles_changed(self, callback: Callable[[], None] | None) -> None:
+        self._profiles_panel.on_profiles_changed = callback
 
     async def _on_pick_cv_click(self, _: Any) -> None:
         files = await self._file_picker.pick_files(

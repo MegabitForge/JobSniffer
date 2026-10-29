@@ -1,7 +1,5 @@
 import logging
-import random
 import re
-import threading
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import replace
@@ -12,7 +10,6 @@ import undetected_chromedriver as uc  # type: ignore[import-untyped]
 from selenium.common.exceptions import WebDriverException
 
 from job_sniffer.models import JobOffer, JobSearch
-from job_sniffer.sources._common import is_poland_location
 from job_sniffer.sources._next_data import extract_next_data
 from job_sniffer.sources._text import (
     clean_text,
@@ -21,14 +18,11 @@ from job_sniffer.sources._text import (
     join_unique,
 )
 from job_sniffer.sources.base import (
-    DuplicateChecker,
-    EnrichedOfferHandler,
-    dedupe_listing_offers,
-    filter_new_offers,
-    limit_offers,
-    offer_listing_key,
-    process_enriched_offers,
-    wait_before_next_page,
+    DEFAULT_PACING,
+    Pacing,
+    ScanHooks,
+    ScanReport,
+    scan_offers,
 )
 from job_sniffer.sources.browser import (
     BrowserClosedError,
@@ -36,6 +30,7 @@ from job_sniffer.sources.browser import (
     fetch_with_existing_browser,
     start_undetected_chrome,
 )
+from job_sniffer.sources.filters import KEYWORDS_FILTER, FilterOption, SourceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -45,49 +40,35 @@ class TheProtocolJobSource:
 
     def __init__(
         self,
+        hooks: ScanHooks | None = None,
         *,
+        pacing: Pacing = DEFAULT_PACING,
         chrome_user_data_dir: str = ".theprotocol-profile",
         timeout_seconds: float = 90.0,
-        detail_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        pagination_delay_seconds: tuple[float, float] = (2.0, 4.0),
-        max_pages: int = 20,
-        stop_event: threading.Event | None = None,
-        duplicate_checker: DuplicateChecker | None = None,
-        enriched_offer_handler: EnrichedOfferHandler | None = None,
     ) -> None:
+        self.hooks = hooks or ScanHooks()
+        self.pacing = pacing
         self.chrome_user_data_dir = chrome_user_data_dir
         self.timeout_seconds = timeout_seconds
-        self.detail_delay_seconds = detail_delay_seconds
-        self.pagination_delay_seconds = pagination_delay_seconds
-        self.max_pages = max_pages
-        self.stop_event = stop_event
-        self.duplicate_checker = duplicate_checker
-        self.enriched_offer_handler = enriched_offer_handler
 
-    def search(self, search: JobSearch) -> list[JobOffer]:
+    def search(self, search: JobSearch) -> ScanReport:
         logger.info(
-            "Starting TheProtocol search: keywords=%r location=%r limit=%s",
-            search.keywords,
-            search.location,
-            search.limit,
+            "Starting TheProtocol search: filters=%s limit=%s", search.filters, search.limit
         )
         url = build_search_url(search)
         logger.info("Built TheProtocol search URL: %s", url)
-        return self._collect_offers_with_browser(url, search=search)
-
-    def _collect_offers_with_browser(self, url: str, *, search: JobSearch) -> list[JobOffer]:
         logger.info("Starting one TheProtocol browser session for listing and detail pages")
         driver = start_undetected_chrome(self.chrome_user_data_dir)
         try:
-            self._raise_if_stopped()
-            offers = self._collect_listing_pages(driver, url, limit=search.limit)
-            new_offers = filter_new_offers(offers, self.duplicate_checker)
-            logger.info("Parsed %s TheProtocol offers, %s were new", len(offers), len(new_offers))
-            limited_offers = limit_offers(new_offers, search.limit)
-            return process_enriched_offers(
-                limited_offers,
+            return scan_offers(
+                lambda page: parse_theprotocol_offers(
+                    self._fetch_html(driver, _with_page(url, page))
+                ),
                 lambda offer: self._enrich_offer_from_detail(driver, offer),
-                self.enriched_offer_handler,
+                search=search,
+                hooks=self.hooks,
+                pacing=self.pacing,
+                label="TheProtocol",
             )
         finally:
             logger.info("Closing TheProtocol browser session")
@@ -96,47 +77,6 @@ class TheProtocolJobSource:
             except WebDriverException:
                 logger.info("TheProtocol browser session was already closed")
 
-    def _collect_listing_pages(
-        self, driver: uc.Chrome, url: str, *, limit: int | None = None
-    ) -> list[JobOffer]:
-        offers: list[JobOffer] = []
-        seen_keys: set[tuple[str, str]] = set()
-
-        for page in range(1, self.max_pages + 1):
-            self._raise_if_stopped()
-            self._wait_before_listing_page(page)
-            page_url = _with_page(url, page)
-            html_text = self._fetch_html(driver, page_url)
-            page_offers = parse_theprotocol_offers(html_text)
-            page_new = [offer for offer in page_offers if offer_listing_key(offer) not in seen_keys]
-            logger.info(
-                "Parsed %s TheProtocol offers from listing page %s, %s were new in this scan",
-                len(page_offers),
-                page,
-                len(page_new),
-            )
-            if not page_offers or not page_new:
-                break
-            for offer in page_new:
-                seen_keys.add(offer_listing_key(offer))
-            offers.extend(page_new)
-            if limit is not None and len(offers) >= limit:
-                logger.info(
-                    "Reached requested limit of %s TheProtocol offers, stopping pagination",
-                    limit,
-                )
-                break
-        else:
-            logger.warning("Stopped TheProtocol pagination after max_pages=%s", self.max_pages)
-
-        return dedupe_listing_offers(offers)
-
-    def _wait_before_listing_page(self, page: int) -> None:
-        delay = wait_before_next_page(page, self.pagination_delay_seconds, self.stop_event)
-        if delay is not None:
-            logger.info("Waited %.1fs before TheProtocol listing page %s", delay, page)
-        self._raise_if_stopped()
-
     def _fetch_html(self, driver: uc.Chrome, url: str) -> str:
         logger.info("Fetching TheProtocol page with existing browser: %s", url)
         html_text = fetch_with_existing_browser(
@@ -144,10 +84,11 @@ class TheProtocolJobSource:
             url,
             timeout_seconds=self.timeout_seconds,
             wait_until=lambda browser: (
-                self._is_stopped() or "__NEXT_DATA__" in str(browser.page_source)
+                self.hooks.is_stopped() or "__NEXT_DATA__" in str(browser.page_source)
             ),
         )
-        self._raise_if_stopped()
+        # The wait ends early on stop; the partial page must not be parsed.
+        self.hooks.raise_if_stopped()
         return html_text
 
     def _enrich_offer_from_detail(self, driver: uc.Chrome, offer: JobOffer) -> JobOffer | None:
@@ -155,12 +96,6 @@ class TheProtocolJobSource:
             logger.warning("Skipping TheProtocol offer without a detail URL: %s", offer.title)
             return None
 
-        self._raise_if_stopped()
-
-        delay = random.uniform(*self.detail_delay_seconds)
-        logger.info("Waiting %.1fs before TheProtocol detail fetch: %s", delay, offer.url)
-        if self.stop_event and self.stop_event.wait(delay):
-            self._raise_if_stopped()
         try:
             html_text = self._fetch_html(driver, offer.url)
             detail = parse_theprotocol_offer_detail(html_text)
@@ -182,26 +117,163 @@ class TheProtocolJobSource:
             raw={**offer.raw, "detail": raw_detail if isinstance(raw_detail, dict) else {}},
         )
 
-    def _is_stopped(self) -> bool:
-        return self.stop_event is not None and self.stop_event.is_set()
 
-    def _raise_if_stopped(self) -> None:
-        if self._is_stopped():
-            raise BrowserFetchError(
-                "TheProtocol scan cancelled because the application is closing."
-            )
+_SPECIALIZATIONS = (
+    FilterOption("backend", "Backend"),
+    FilterOption("frontend", "Frontend"),
+    FilterOption("devops", "DevOps"),
+    FilterOption("fullstack", "Fullstack"),
+    FilterOption("gamedev", "GameDev"),
+    FilterOption("mobile", "Mobile"),
+    FilterOption("embedded", "Embedded"),
+    FilterOption("architecture", "Architektura"),
+    FilterOption("qa-testing", "QA / Testing"),
+    FilterOption("security", "Bezpieczeństwo"),
+    FilterOption("ai-ml", "AI / ML"),
+    FilterOption("big-data-science", "Big Data / Data Science"),
+    FilterOption("helpdesk", "Helpdesk"),
+    FilterOption("it-admin", "Administracja IT"),
+    FilterOption("agile", "Agile"),
+    FilterOption("product-management", "Product Management"),
+    FilterOption("project-management", "Project Management"),
+    FilterOption("ux-ui", "UX / UI"),
+    FilterOption("business-analytics", "Business Analytics"),
+    FilterOption("sap-erp", "SAP / ERP"),
+    FilterOption("system-analytics", "System Analytics"),
+    FilterOption("data-analytics-bi", "Data Analytics / BI"),
+)
+
+_LEVELS = (
+    FilterOption("trainee", "Trainee"),
+    FilterOption("assistant", "Assistant"),
+    FilterOption("junior", "Junior"),
+    FilterOption("mid", "Mid"),
+    FilterOption("senior", "Senior"),
+    FilterOption("expert", "Expert"),
+    FilterOption("lead", "Lead"),
+)
+
+_WORK_MODES = (
+    FilterOption("zdalna", "Zdalna"),
+    FilterOption("hybrydowa", "Hybrydowa"),
+    FilterOption("stacjonarna", "Stacjonarna"),
+)
+
+_CONTRACT_TYPES = (
+    FilterOption("kontrakt-b2b", "Kontrakt B2B"),
+    FilterOption("umowa-o-prace", "Umowa o pracę"),
+    FilterOption("umowa-zlecenie", "Umowa zlecenie"),
+    FilterOption("umowa-o-dzielo", "Umowa o dzieło"),
+    FilterOption("umowa-na-zastepstwo", "Umowa na zastępstwo"),
+    FilterOption("umowa-agencyjna", "Umowa agencyjna"),
+    FilterOption("umowa-o-prace-tymczasowa", "Umowa o pracę tymczasową"),
+    FilterOption("umowa-o-staz-praktyki", "Umowa o staż / praktyki"),
+)
+
+_LOCATIONS = (
+    FilterOption("warszawa", "Warszawa"),
+    FilterOption("krakow", "Kraków"),
+    FilterOption("wroclaw", "Wrocław"),
+    FilterOption("gdansk", "Gdańsk"),
+    FilterOption("poznan", "Poznań"),
+    FilterOption("katowice", "Katowice"),
+    FilterOption("lodz", "Łódź"),
+    FilterOption("lublin", "Lublin"),
+    FilterOption("rzeszow", "Rzeszów"),
+    FilterOption("szczecin", "Szczecin"),
+    FilterOption("bialystok", "Białystok"),
+    FilterOption("bydgoszcz", "Bydgoszcz"),
+    FilterOption("torun", "Toruń"),
+    FilterOption("gdynia", "Gdynia"),
+    FilterOption("opole", "Opole"),
+    FilterOption("zielona-gora", "Zielona Góra"),
+    FilterOption("kielce", "Kielce"),
+    FilterOption("bielsko-biala", "Bielsko-Biała"),
+    FilterOption("olsztyn", "Olsztyn"),
+    FilterOption("czestochowa", "Częstochowa"),
+    FilterOption("sopot", "Sopot"),
+    FilterOption("ue", "UE"),
+    FilterOption("reszta-swiata", "Reszta świata"),
+)
+
+FILTERS: tuple[SourceFilter, ...] = (
+    KEYWORDS_FILTER,
+    SourceFilter(
+        key="specializations",
+        label="Specjalizacje",
+        kind="multi_select",
+        options=_SPECIALIZATIONS,
+    ),
+    SourceFilter(
+        key="technologies",
+        label="Technologie i narzędzia",
+        kind="multi_text",
+        hint="np. java, .net, c#",
+    ),
+    SourceFilter(
+        key="levels",
+        label="Poziom stanowiska",
+        kind="multi_select",
+        options=_LEVELS,
+    ),
+    SourceFilter(
+        key="locations",
+        label="Lokalizacje",
+        kind="multi_select",
+        options=_LOCATIONS,
+    ),
+    SourceFilter(
+        key="work_modes",
+        label="Tryb pracy",
+        kind="multi_select",
+        options=_WORK_MODES,
+    ),
+    SourceFilter(
+        key="contract_types",
+        label="Rodzaj umowy",
+        kind="multi_select",
+        options=_CONTRACT_TYPES,
+    ),
+)
+
+
+_FILTER_SEGMENTS: tuple[tuple[str, str, bool], ...] = (
+    ("specializations", "sp", False),
+    ("technologies", "t", False),
+    ("levels", "p", False),
+    ("locations", "wp", True),
+    ("work_modes", "rw", False),
+    ("contract_types", "c", False),
+)
 
 
 def build_search_url(search: JobSearch) -> str:
-    keyword = quote(search.keywords.strip())
-    if is_poland_location(search.location):
-        if not keyword:
-            return "https://theprotocol.it/praca"
-        return f"https://theprotocol.it/praca?kw={keyword}"
-    location = _slugify_location(search.location)
+    keyword = quote(search.text("keywords"))
+    segments = _build_filter_segments(search)
+    if segments:
+        url = f"https://theprotocol.it/filtry/{'/'.join(segments)}"
+        if keyword:
+            url = f"{url}?kw={keyword}"
+        return url
     if not keyword:
-        return f"https://theprotocol.it/filtry/{location};wp"
-    return f"https://theprotocol.it/filtry/{location};wp?kw={keyword}"
+        return "https://theprotocol.it/praca"
+    return f"https://theprotocol.it/praca?kw={keyword}"
+
+
+def _build_filter_segments(search: JobSearch) -> list[str]:
+    segments: list[str] = []
+    for key, code, slugify in _FILTER_SEGMENTS:
+        values = search.values(key)
+        if not values:
+            continue
+        if slugify:
+            slugs = [_slugify_location(value) for value in values]
+            joined = ",".join(slug for slug in slugs if slug)
+        else:
+            joined = ",".join(quote(value, safe="") for value in values)
+        if joined:
+            segments.append(f"{joined};{code}")
+    return segments
 
 
 def _with_page(url: str, page: int) -> str:
@@ -269,7 +341,7 @@ def _slugify_location(location: str) -> str:
     value = unicodedata.normalize("NFKD", value)
     value = "".join(char for char in value if not unicodedata.combining(char))
     value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
-    return value or "polska"
+    return value
 
 
 def _format_location(offer: dict[str, Any]) -> str | None:

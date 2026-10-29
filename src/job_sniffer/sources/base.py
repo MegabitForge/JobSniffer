@@ -1,59 +1,186 @@
-"""Job source contracts."""
+"""Job source contracts and the scan loop shared by all sources."""
 
+import logging
 import random
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
+from dataclasses import dataclass
 from threading import Event
-from typing import Protocol
+from typing import Literal, Protocol
 
 from job_sniffer.models import JobOffer, JobSearch
+
+logger = logging.getLogger(__name__)
 
 DuplicateChecker = Callable[[JobOffer], bool]
 EnrichedOfferHandler = Callable[[JobOffer], bool]
 
 
-def dedupe_listing_offers(offers: Iterable[JobOffer]) -> list[JobOffer]:
-    """Keep the first listing occurrence for each source-local offer identity."""
-    result: list[JobOffer] = []
-    seen: set[tuple[str, str]] = set()
-    for offer in offers:
-        key = offer_listing_key(offer)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(offer)
-    return result
+class ScanCancelledError(RuntimeError):
+    """Raised when the application stops a scan in progress."""
 
 
-def filter_new_offers(
-    offers: list[JobOffer],
-    duplicate_checker: DuplicateChecker | None,
+@dataclass(frozen=True)
+class ScanProgress:
+    """Progress report emitted by a source during a scan."""
+
+    stage: Literal["listing", "enrich"]
+    current: int
+    total: int | None
+
+
+ProgressHandler = Callable[[ScanProgress], None]
+
+
+@dataclass(frozen=True)
+class ScanHooks:
+    """Callbacks connecting a source to the application during one scan.
+
+    ``duplicate_checker`` tells whether a listing offer is already stored, and
+    ``enriched_offer_handler`` stores an enriched offer, returning False for a duplicate.
+    """
+
+    stop_event: Event | None = None
+    duplicate_checker: DuplicateChecker | None = None
+    enriched_offer_handler: EnrichedOfferHandler | None = None
+    progress_handler: ProgressHandler | None = None
+
+    def is_stopped(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def raise_if_stopped(self) -> None:
+        if self.is_stopped():
+            raise ScanCancelledError("Scan cancelled because the application is closing.")
+
+    def wait(self, delay_seconds: tuple[float, float]) -> None:
+        """Sleep for a random delay, waking up early when the scan is stopped."""
+        delay = random.uniform(*delay_seconds)
+        if self.stop_event is not None:
+            self.stop_event.wait(delay)
+        else:
+            time.sleep(delay)
+        self.raise_if_stopped()
+
+    def report_progress(self, progress: ScanProgress) -> None:
+        if self.progress_handler is not None:
+            self.progress_handler(progress)
+
+
+@dataclass(frozen=True)
+class Pacing:
+    """Pagination bounds and delays that keep scans polite to the job boards."""
+
+    max_pages: int = 20
+    page_delay_seconds: tuple[float, float] = (2.0, 4.0)
+    detail_delay_seconds: tuple[float, float] = (2.0, 4.0)
+
+
+DEFAULT_PACING = Pacing()
+
+
+@dataclass
+class ScanReport:
+    """What happened to the offers a source found during one scan."""
+
+    pages: int = 0
+    listed: int = 0
+    filtered_out: int = 0
+    known: int = 0
+    failed: int = 0
+    saved: int = 0
+    truncated: bool = False
+
+
+def scan_offers(
+    fetch_page: Callable[[int], list[JobOffer]],
+    enrich_offer: Callable[[JobOffer], JobOffer | None],
+    *,
+    search: JobSearch,
+    hooks: ScanHooks,
+    pacing: Pacing,
+    label: str,
+    accept: Callable[[JobOffer], bool] | None = None,
+) -> ScanReport:
+    """Collect new offers from paginated listing pages, then enrich and hand over each one.
+
+    Offers already stored (``hooks.duplicate_checker``) or rejected by ``accept`` are
+    skipped during pagination, so an optional ``search.limit`` counts only new offers.
+    ``enrich_offer`` returns None when the detail page cannot be used; such offers are
+    reported as failed.
+    """
+    report = ScanReport()
+    candidates = _collect_new_offers(fetch_page, search.limit, hooks, pacing, label, report, accept)
+
+    for index, offer in enumerate(candidates, start=1):
+        hooks.wait(pacing.detail_delay_seconds)
+        enriched_offer = enrich_offer(offer)
+        hooks.raise_if_stopped()
+        hooks.report_progress(ScanProgress(stage="enrich", current=index, total=len(candidates)))
+        if enriched_offer is None:
+            report.failed += 1
+        elif hooks.enriched_offer_handler is None or hooks.enriched_offer_handler(enriched_offer):
+            report.saved += 1
+        else:
+            report.known += 1
+
+    logger.info("Finished %s scan: %s", label, report)
+    return report
+
+
+def _collect_new_offers(
+    fetch_page: Callable[[int], list[JobOffer]],
+    limit: int | None,
+    hooks: ScanHooks,
+    pacing: Pacing,
+    label: str,
+    report: ScanReport,
+    accept: Callable[[JobOffer], bool] | None,
 ) -> list[JobOffer]:
-    """Return offers that are not known duplicates."""
-    if duplicate_checker is None:
-        return offers
-    return [offer for offer in offers if not duplicate_checker(offer)]
+    candidates: list[JobOffer] = []
+    seen_keys: set[tuple[str, str]] = set()
 
+    for page in range(1, pacing.max_pages + 1):
+        hooks.raise_if_stopped()
+        if page > 1:
+            hooks.wait(pacing.page_delay_seconds)
+        page_offers = fetch_page(page)
+        hooks.raise_if_stopped()
+        report.pages = page
+        hooks.report_progress(ScanProgress(stage="listing", current=page, total=None))
 
-def limit_offers(offers: list[JobOffer], limit: int | None) -> list[JobOffer]:
-    """Apply an optional search limit."""
-    return offers if limit is None else offers[:limit]
+        unseen = 0
+        for offer in page_offers:
+            key = offer_listing_key(offer)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unseen += 1
+            report.listed += 1
+            if accept is not None and not accept(offer):
+                report.filtered_out += 1
+            elif hooks.duplicate_checker is not None and hooks.duplicate_checker(offer):
+                report.known += 1
+            else:
+                candidates.append(offer)
+                if limit is not None and len(candidates) >= limit:
+                    logger.info("Reached the limit of %s new %s offers", limit, label)
+                    return candidates
 
+        logger.info(
+            "Parsed %s %s offers from listing page %s, %s unseen in this scan",
+            len(page_offers),
+            label,
+            page,
+            unseen,
+        )
+        # Boards answer an out-of-range page with the last one, so a page without
+        # unseen offers marks the end of the listing.
+        if not unseen:
+            return candidates
 
-def wait_before_next_page(
-    page: int,
-    delay_seconds: tuple[float, float],
-    stop_event: Event | None,
-) -> float | None:
-    """Wait before paginated listing pages after the first one."""
-    if page <= 1:
-        return None
-    delay = random.uniform(*delay_seconds)
-    if stop_event is not None:
-        stop_event.wait(delay)
-    else:
-        time.sleep(delay)
-    return delay
+    report.truncated = True
+    logger.warning("Stopped %s pagination after max_pages=%s", label, pacing.max_pages)
+    return candidates
 
 
 def offer_listing_key(offer: JobOffer) -> tuple[str, str]:
@@ -69,28 +196,11 @@ def offer_listing_key(offer: JobOffer) -> tuple[str, str]:
     )
 
 
-def process_enriched_offers(
-    offers: Iterable[JobOffer],
-    enrich_offer: Callable[[JobOffer], JobOffer | None],
-    enriched_offer_handler: EnrichedOfferHandler | None,
-) -> list[JobOffer]:
-    """Enrich offers sequentially and optionally handle each one immediately."""
-    result: list[JobOffer] = []
-    for offer in offers:
-        enriched_offer = enrich_offer(offer)
-        if enriched_offer is None:
-            continue
-        if enriched_offer_handler is not None and not enriched_offer_handler(enriched_offer):
-            continue
-        result.append(enriched_offer)
-    return result
-
-
 class JobSource(Protocol):
     """Contract implemented by all job source adapters."""
 
     source_name: str
 
-    def search(self, search: JobSearch) -> Iterable[JobOffer]:
-        """Return offers matching the search criteria."""
+    def search(self, search: JobSearch) -> ScanReport:
+        """Scan the board for offers matching the search, handing each one to the hooks."""
         ...
